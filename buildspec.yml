@@ -1,0 +1,65 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-east-2
+    AWS_ACCOUNT_ID: 727107634298
+    ECR_REPO_NAME: staging/twam
+    ECR_REPO: 727107634298.dkr.ecr.us-east-2.amazonaws.com/staging/twam
+    IMAGE_TAG: latest
+    CONTAINER_NAME: twam
+    REMOTE_USER: ec2-user
+    REMOTE_HOST: dev.doerz.tech
+    REMOTE_PATH: /home/ec2-user/apps/twam
+    SSH_SECRET_ID: doerz-ssh-key-v2
+
+phases:
+  pre_build:
+    commands:
+      - echo "Pre-build phase"
+      - aws --version
+      - echo "Setting up environment variables..."
+      - echo "ECR_REPO=$ECR_REPO"
+      - echo "Calling get-caller-identity..."
+      - aws sts get-caller-identity
+      - aws ecr describe-repositories --region $AWS_DEFAULT_REGION || echo "Repository may not exist yet."
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPO
+      - echo "Logged in to ECR successfully"
+
+  build:
+    commands:
+      - echo "Build phase"
+      - echo "Building Docker image..."
+      - docker build -t $ECR_REPO:$IMAGE_TAG .
+
+  post_build:
+    commands:
+      - echo "Post-build phase"
+      - echo "Pushing Docker image to ECR..."
+      - docker push $ECR_REPO:$IMAGE_TAG
+
+      - echo "Retrieving SSH private key from Secrets Manager..."
+      - aws secretsmanager get-secret-value --secret-id $SSH_SECRET_ID --query SecretString --output text | sed 's/\\n/\n/g' > private_key.pem
+      - chmod 400 private_key.pem
+
+      - echo "Connecting to remote EC2 and deploying the container..."
+      - |
+        ssh -i private_key.pem -o StrictHostKeyChecking=no $REMOTE_USER@$REMOTE_HOST <<EOF
+          set -e
+          echo "Logging into ECR on remote server..."
+          aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPO
+
+          echo "Stopping and removing old container if it exists..."
+          docker stop $CONTAINER_NAME || true
+          docker rm $CONTAINER_NAME || true
+
+          echo "Pulling latest image..."
+          docker pull $ECR_REPO:$IMAGE_TAG
+
+          echo "Running new container..."
+          docker run -d --name $CONTAINER_NAME --env-file $REMOTE_PATH/.env -p 8000:8000 $ECR_REPO:$IMAGE_TAG
+        EOF
+
+      - rm -f private_key.pem
+      - echo "Build and deployment completed successfully."
