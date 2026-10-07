@@ -101,6 +101,7 @@ class Mutation:
                 zip_code=input.business_postal_code or "",
                 logo_url=input.logo_url or "",
                 phone=input.phone or "",
+                description=input.business_description or "",
             )
         else:
             raise Exception("Invalid role provided.")
