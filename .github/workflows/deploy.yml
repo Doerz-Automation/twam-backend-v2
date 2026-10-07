@@ -44,8 +44,6 @@ jobs:
             echo "STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }}" >> .env
             echo "STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}" >> .env
             # Add other necessary secrets here
-
-
             # Rebuild and restart the containers
             docker compose build
             docker compose up -d
