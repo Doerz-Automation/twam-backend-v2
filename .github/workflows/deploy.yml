@@ -43,6 +43,8 @@ jobs:
             echo "API_SECRET_KEY=${{ secrets.API_SECRET_KEY }}" >> .env
             echo "STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }}" >> .env
             echo "STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}" >> .env
+            echo "ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }}" >> .env
+            echo "CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS }}" >> .env
             # Add other necessary secrets here
             # Rebuild and restart the containers
             docker compose build
