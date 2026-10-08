@@ -44,6 +44,7 @@ class Query:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["business"])
     @require_settings_verified
     def billing_summary(self, info: Info) -> BillingSummaryType:
         user = info.context.request.user
@@ -115,6 +116,7 @@ class Query:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["business"])
     @require_settings_verified
     def daily_channel_billing(self, info: Info, month: str) -> List[DayBillingType]:
         """
@@ -258,6 +260,7 @@ class Query:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["admin"])
     def get_business_billing_summary(self, info: Info, business_id: int) -> BillingSummaryType:
         # 1. Get the user associated with this business profile
         try:
@@ -342,6 +345,7 @@ class Query:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["business"])
     def has_billing_method(self, info: Info) -> bool:
         """Whether the business has at least one card on file. Boolean only, so it is
         safe outside Settings (billing reminder banner)."""
@@ -352,6 +356,7 @@ class Query:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["business"])
     def get_payment_methods(self, info: Info) -> strawberry.scalars.JSON:
         user = info.context.request.user
         return get_user_payment_methods(user)

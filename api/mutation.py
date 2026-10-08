@@ -160,6 +160,7 @@ class Mutation:
     @require_authentication
     @jwt_required
     @require_api_secret
+    @require_role(["business"])
     def create_setup_intent(self, info: Info) -> str:
         user = info.context.request.user
         return create_setup_intent(user)
@@ -2852,6 +2853,7 @@ class Mutation:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["business"])
     @require_settings_verified
     def set_default_payment_method(self, info: Info, payment_method_id: str) -> DefaultPaymentMethodResponse:
         try:

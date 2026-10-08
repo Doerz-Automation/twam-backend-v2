@@ -119,6 +119,12 @@ def assert_settings_verified(info):
     from .models import SettingsAccess
 
     user = info.context.request.user
+    # The Settings OTP session protects the Business Portal only. Consumer app
+    # users (role "user") and admins share change-password / change-email but
+    # have no Settings area, so they are not asked for it.
+    if getattr(user, "role", None) != "business":
+        return
+
     access = SettingsAccess.objects.filter(user=user).first()
     if not access or not access.is_valid_for(get_access_token_jti(info)):
         raise GraphQLError(
