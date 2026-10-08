@@ -7,11 +7,12 @@ from strawberry.types import Info
 from django.db.models import Prefetch
 from api.utils import attach_flag, build_advertisement_response, build_channel_ad_response, build_discount_history, build_listing_response
 from api.stripe_services import get_user_payment_methods
+from api.decorators import get_access_token_jti
 from api.types import (ReportedItemsType, ReportedListingsType,
                        AdvertisementChannelReturnType, AdvertisementChannelType, AdvertisementReturnType, AdvertisementType, AdvertisementWithChannlesReturnType, BusinessHoursReturnType, BusinessHoursType, BusinessProfileDetailsType, BusinessProfileReturnType, BusinessProfileType, BusinessSubCategoryType, BusinessUserProfileType, ChannelAdvertisementReturnType, ChannelDetailsType, ChannelType, ChannelWithAdsType, ClientLocationType, ClientProfileType, ContactInfoType, ListingType, LocationType,
                        ProfileType, ReportedAdsType, ReportsResponseType, SuspensionType, UserReportsType, UserType, BusinessCategoryType, AdvertisementFlagType, PaymentMethodType,
                        BillingSummaryType, MonthlyInvoiceType, NotificationType,
-                       ChannelDailySpendType, DayBillingType
+                       ChannelDailySpendType, DayBillingType, SettingsSessionStatusType
                        )
 from api.models import (
     Advertisement, AdvertisementChannel, AdvertisementReports, BusinessProfile, ClientProfile, LikedAdvertisement, ListingReports, Suspension, LikedBusinessProfile, Listings, User, Profile, BusinessCategory, AdvertisementFlag, AdvertisementChannelAssignment, MonthlyInvoice
@@ -19,9 +20,9 @@ from api.models import (
 from typing import Optional, List
 from geopy.distance import geodesic
 
-from api.decorators import jwt_required, require_api_secret, require_authentication, require_role
+from api.decorators import jwt_required, require_api_secret, require_authentication, require_role, require_settings_verified
 import logging
-from api.decorators import jwt_required, require_api_secret, require_authentication, require_role
+from api.decorators import jwt_required, require_api_secret, require_authentication, require_role, require_settings_verified
 import logging
 from django.db.models import Q
 from django.utils import timezone
@@ -43,6 +44,7 @@ class Query:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_settings_verified
     def billing_summary(self, info: Info) -> BillingSummaryType:
         user = info.context.request.user
         
@@ -113,6 +115,7 @@ class Query:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_settings_verified
     def daily_channel_billing(self, info: Info, month: str) -> List[DayBillingType]:
         """
         Kisi bhi month ka har din ka channel-wise billing breakdown return karta hai.
@@ -325,6 +328,30 @@ class Query:
     @require_api_secret
     @require_authentication
     @jwt_required
+    def settings_session_status(self, info: Info) -> SettingsSessionStatusType:
+        """Whether the caller currently holds an active Settings OTP session. Returns no sensitive data."""
+        from api.models import SettingsAccess
+        access = SettingsAccess.objects.filter(user=info.context.request.user).first()
+        if not access or not access.is_valid_for(get_access_token_jti(info)):
+            return SettingsSessionStatusType(verified=False, expires_at=None, seconds_remaining=0)
+        remaining = max(0, int((access.verified_until - timezone.now()).total_seconds()))
+        return SettingsSessionStatusType(
+            verified=True, expires_at=access.verified_until, seconds_remaining=remaining)
+
+    @strawberry.field
+    @require_api_secret
+    @require_authentication
+    @jwt_required
+    def has_billing_method(self, info: Info) -> bool:
+        """Whether the business has at least one card on file. Boolean only, so it is
+        safe outside Settings (billing reminder banner)."""
+        user = info.context.request.user
+        return len(get_user_payment_methods(user) or []) > 0
+
+    @strawberry.field
+    @require_api_secret
+    @require_authentication
+    @jwt_required
     def get_payment_methods(self, info: Info) -> strawberry.scalars.JSON:
         user = info.context.request.user
         return get_user_payment_methods(user)
@@ -333,6 +360,10 @@ class Query:
     @require_api_secret
     @require_authentication
     def get_user(self, info: Info, user_id: int) -> UserType:
+        # A caller may only read their own record. Checked before the lookup so
+        # a foreign id gets the same answer whether or not that user exists.
+        if int(user_id) != info.context.request.user.id:
+            raise GraphQLError("You can only view your own account.")
         try:
             user = User.objects.get(id=user_id)
 

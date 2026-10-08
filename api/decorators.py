@@ -94,3 +94,44 @@ def require_not_suspended(func):
                 raise GraphQLError("Your business account is suspended. You cannot perform this action.")
         return func(self, info, *args, **kwargs)
     return wrapper
+
+
+SETTINGS_VERIFICATION_REQUIRED = "SETTINGS_VERIFICATION_REQUIRED"
+
+
+def get_access_token_jti(info):
+    """Return the `jti` of the access token on the current request, or None."""
+    authorization = info.context.request.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        return None
+    try:
+        return AccessToken(authorization.split(" ")[1]).get("jti")
+    except Exception:
+        return None
+
+
+def assert_settings_verified(info):
+    """
+    Raise unless the caller holds an active Settings verification session for
+    the access token used on this request. Used by every protected Settings API.
+    """
+    from graphql import GraphQLError
+    from .models import SettingsAccess
+
+    user = info.context.request.user
+    access = SettingsAccess.objects.filter(user=user).first()
+    if not access or not access.is_valid_for(get_access_token_jti(info)):
+        raise GraphQLError(
+            SETTINGS_VERIFICATION_REQUIRED,
+            extensions={"code": SETTINGS_VERIFICATION_REQUIRED, "http_status": 403},
+        )
+
+
+def require_settings_verified(func):
+    """Decorator: the caller must have a valid Settings OTP session (read or write)."""
+    @wraps(func)
+    def wrapper(self, info: Info, *args, **kwargs):
+        assert_settings_verified(info)
+        return func(self, info, *args, **kwargs)
+
+    return wrapper

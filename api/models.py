@@ -155,6 +155,48 @@ class PasswordOtpAttempt(models.Model):
         return f"PasswordOtpAttempt: {self.user.email} — {self.attempt_count} attempt(s)"
 
 
+class SettingsAccess(models.Model):
+    """
+    Server-side authorization for the whole Business Portal Settings area.
+
+    A single successful OTP verification sets `verified_until` to a fixed
+    10 minutes from that moment. The window is never extended by activity.
+    It is bound to the access token (`verified_jti`) it was granted for, so a
+    new login or a different token never inherits it.
+
+    Failed OTP attempts are tracked here too, separately from the shared OTP
+    model, so that resending an OTP does not reset the counter.
+    """
+    SESSION_MINUTES = 10
+
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="settings_access"
+    )
+    attempt_count = models.IntegerField(default=0)
+    locked_at = models.DateTimeField(null=True, blank=True)
+    verified_until = models.DateTimeField(null=True, blank=True)
+    verified_jti = models.CharField(max_length=64, blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def is_valid_for(self, jti):
+        return bool(
+            jti
+            and self.verified_jti == jti
+            and self.verified_until
+            and timezone.now() < self.verified_until
+        )
+
+    def clear_session(self):
+        self.verified_until = None
+        self.verified_jti = ""
+        self.save(update_fields=["verified_until", "verified_jti", "updated_at"])
+
+    def __str__(self):
+        return f"SettingsAccess: {self.user.email} — until {self.verified_until}"
+
+
 
 # class BusinessCategory(models.Model):
 #     name = models.CharField(max_length=100, unique=True)
