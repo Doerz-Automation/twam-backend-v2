@@ -67,8 +67,8 @@ else:
 # __all__ = ['env']
 
 # Load environment variables
-SECRET_KEY = "django-insecure-k4=cb+x_0xscqf@$#6a8tz-j22fy8y!*qtq(2hgu9-p46wc6pq"
-API_SECRET_KEY = "PWa6Nq51HnWRzh2gXHtJR25wHIv4muGA"
+SECRET_KEY = "test-only-secret-key-never-used-outside-the-test-suite"
+API_SECRET_KEY = "test-only-api-secret"
 OTP_RESEND_INTERVAL = 30
 OTP_MAX_RETRIES = 3
 OTP_COOLDOWN_PERIOD = 1800
