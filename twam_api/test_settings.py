@@ -139,31 +139,14 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "twam_api.wsgi.application"
 
+# Tests run on an in-memory SQLite database (ArrayField is mocked above), so
+# they never need a real database or any credentials.
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': "twam_db",
-        'USER': "postgres",
-        'PASSWORD': "9LSsIQtikUQsXpQ3VYda",
-        'HOST': "twam-db.ccz4m4wmiwd7.us-east-1.rds.amazonaws.com",
-        'PORT': env('DB_PORT', default=5432, cast=int)
-
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": ":memory:",
     }
 }
-
-        # 'HOST': "127.0.0.1",  # <- use local tunnel
-        # 'PORT': 5544           # <- local forwarded port
-
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.postgresql',
-#         'NAME': "twam_db",
-#         'USER': "postgres",
-#         'PASSWORD': "123456",
-#         'HOST': 'localhost',
-#         'PORT': "5432"
-#     }
-# }
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(days=7),
