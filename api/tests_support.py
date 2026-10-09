@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
+from django.conf import settings
 from django.utils import timezone
 from api.models import User, BusinessProfile, SupportTicket
 from api.mutation import Mutation
@@ -39,7 +40,7 @@ class TestSupportEmail:
         mock_request = MagicMock()
         mock_request.user = business_user
         mock_request.headers = {
-            'X-API-SECRET': 'PWa6Nq51HnWRzh2gXHtJR25wHIv4muGA',
+            'X-API-SECRET': settings.API_SECRET_KEY,
             'Authorization': 'Bearer dummy_token'
         }
         
@@ -111,7 +112,7 @@ class TestSupportEmail:
         mock_request = MagicMock()
         mock_request.user = business_user
         mock_request.headers = {
-            'X-API-SECRET': 'PWa6Nq51HnWRzh2gXHtJR25wHIv4muGA',
+            'X-API-SECRET': settings.API_SECRET_KEY,
             'Authorization': 'Bearer dummy_token'
         }
         mock_context = MagicMock()

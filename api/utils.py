@@ -15,6 +15,7 @@ from django.apps import apps
 from graphql import GraphQLError
 from typing import Optional
 import random
+import re
 import os
 import logging
 import boto3
@@ -222,6 +223,23 @@ def validate_api_secret(info) -> None:
 
 def generate_report_id():
     return str(random.randint(10000000, 99999999))
+
+
+def normalize_na_phone(value):
+    """
+    Validate a Canada/US phone number and return it as +1XXXXXXXXXX.
+
+    Accepts "+1 222 333 4444", "+1 2223334444" and the same with dashes or
+    brackets. Anything other than +1 followed by exactly 10 digits is rejected,
+    so over-long numbers can never be stored. Empty input returns "".
+    """
+    if not value or not str(value).strip():
+        return ""
+    cleaned = re.sub(r"[\s\-().]", "", str(value))
+    if not re.fullmatch(r"\+1\d{10}", cleaned):
+        raise GraphQLError(
+            "Enter a valid phone number with 10 digits, like +1 222 333 4444.")
+    return cleaned
 
 
 def generate_and_send_otp(user, purpose="Authentication", new_email=False, expiry_minutes=5):

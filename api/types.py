@@ -1182,6 +1182,21 @@ class VerifyPaymentOtpResponse:
 
 
 @strawberry.type
+class VerifySettingsOtpResponse:
+    success: bool
+    message: str
+    expires_at: Optional[datetime] = None
+    seconds_remaining: Optional[int] = None
+
+
+@strawberry.type
+class SettingsSessionStatusType:
+    verified: bool
+    expires_at: Optional[datetime] = None
+    seconds_remaining: int = 0
+
+
+@strawberry.type
 class RequestPasswordOtpResponse:
     success: bool
     message: str

@@ -11,7 +11,8 @@ from api.types import (
     AddCategoryInput, UpdateCategoryInput, BusinessProfileUpdateInput, BusinessProfileType, BusinessCategoryType,
     ReportAdvertisementInput, ReportAdvertisementResponse, ResolveAdvertisementInput, SuspensionType, CreateSuspensionInput, ReportInput, DefaultPaymentMethodResponse,
     RequestPaymentOtpResponse, VerifyPaymentOtpResponse, RequestPasswordOtpResponse, VerifyPasswordOtpResponse,
-    NotificationSuccessType, DeactivateBusinessResponse, UpdateAccountHolderInput
+    NotificationSuccessType, DeactivateBusinessResponse, UpdateAccountHolderInput,
+    VerifySettingsOtpResponse
 )
 from api.models import (AdvertisementReports, ListingReports,
                         Advertisement, AdvertisementCategory, AdvertisementChannel,
@@ -20,7 +21,7 @@ from api.models import (AdvertisementReports, ListingReports,
                         LikedAdvertisementChannel, LikedBusinessProfile, User, Profile,
                         BusinessProfile, OTP, BusinessProfile, BusinessHours,
                         BusinessCategory, AdvertisementFlag, Listings, Suspension,
-                        PaymentOtpAttempt, PasswordOtpAttempt
+                        PaymentOtpAttempt, PasswordOtpAttempt, SettingsAccess
                         )
 from django.db import transaction
 from django.db.models import Q
@@ -31,9 +32,10 @@ from django.utils.timezone import now
 from django.core.mail import send_mail
 from django.contrib.auth import authenticate
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
-from api.utils import SESEmailSender, generate_jwt_token, generate_and_send_otp, generate_report_id
+from api.utils import SESEmailSender, generate_jwt_token, generate_and_send_otp, generate_report_id, normalize_na_phone
 from api.stripe_services import create_stripe_customer, cancel_subscription, create_setup_intent, set_customer_default_payment_method
-from api.decorators import jwt_required, require_api_secret, require_authentication, require_role, require_not_suspended
+from api.decorators import (jwt_required, require_api_secret, require_authentication, require_role, require_not_suspended,
+                            require_settings_verified, assert_settings_verified, get_access_token_jti)
 from twam_api import settings
 from graphql import GraphQLError
 from django.contrib.auth import get_user_model
@@ -63,6 +65,27 @@ def compute_master_clock_expiry(end_date):
 MAX_LISTING_IMAGES = 2
 
 
+def _business_profile_is_complete(profile) -> bool:
+    """Same fields the portal requires before a business can operate (mirrors the
+    frontend's isBusinessProfileComplete)."""
+    return bool(
+        profile.category_id
+        and profile.address
+        and profile.business_name
+        and profile.city
+        and profile.description
+        and profile.longitude
+        and profile.logo_url
+        and profile.latitude
+        and profile.payment_methods
+        and profile.phone
+        and profile.state
+        and profile.subcategories
+        and profile.zip_code
+        and profile.business_hours.exists()
+    )
+
+
 @strawberry.type
 class Mutation:
     @strawberry.mutation
@@ -70,6 +93,8 @@ class Mutation:
     def register(self, info: Info, input: RegisterInput) -> UserType:
         first_name = input.first_name or ""
         last_name = input.last_name or ""
+        # Canada/US numbers only: +1 and exactly 10 digits, stored as +1XXXXXXXXXX
+        personal_phone = normalize_na_phone(input.personal_phone)
 
         user = User.objects.create_user(
             email=input.email.strip().lower(),
@@ -79,7 +104,7 @@ class Mutation:
             role=input.role,
             is_active=False,
             is_verified=False,
-            personal_phone=input.personal_phone or "",
+            personal_phone=personal_phone,
         )
 
         if input.role == "user":
@@ -158,6 +183,7 @@ class Mutation:
     @require_authentication
     @jwt_required
     @require_api_secret
+    @require_role(["business"])
     def create_setup_intent(self, info: Info) -> str:
         user = info.context.request.user
         return create_setup_intent(user)
@@ -350,6 +376,9 @@ class Mutation:
             # Reset OTP verification attempts on successful login
             PaymentOtpAttempt.objects.filter(user=user).update(attempt_count=0, locked_at=None)
             PasswordOtpAttempt.objects.filter(user=user).update(attempt_count=0, locked_at=None)
+            # A fresh login never inherits a previous Settings verification
+            SettingsAccess.objects.filter(user=user).update(
+                attempt_count=0, locked_at=None, verified_until=None, verified_jti="")
 
             # Return response object with user details and token
             return LoginResponse(
@@ -390,6 +419,13 @@ class Mutation:
         request = info.context["request"]
         user = request.user
         business_profile = user.business_profile
+
+        # Profile setup (the onboarding wizard) is not part of Settings. Once
+        # the account is approved AND its profile is complete, every profile
+        # edit is a Settings edit and needs an active Settings session. An
+        # approved business that has not finished setup can still finish it.
+        if user.is_admin_approved and _business_profile_is_complete(business_profile):
+            assert_settings_verified(info)
 
         # Update basic fields
         if input.business_name is not None:
@@ -462,6 +498,7 @@ class Mutation:
     @require_api_secret
     @require_authentication
     @require_role(["business"])
+    @require_settings_verified
     def update_account_holder(self, info: Info, input: UpdateAccountHolderInput) -> UserType:
         request = info.context["request"]
         user = request.user
@@ -1257,6 +1294,7 @@ class Mutation:
     @require_authentication
     @jwt_required
     @require_api_secret
+    @require_settings_verified
     def change_password(self, info: Info, input: ChangePasswordInput) -> str:
         request = info.context.request
         user = request.user  # Get the currently logged-in user
@@ -1273,6 +1311,7 @@ class Mutation:
     @require_authentication
     @jwt_required
     @require_api_secret
+    @require_settings_verified
     def change_email(self, info: Info, email: str) -> str:
         try:
             new_email = email.strip().lower()
@@ -1296,6 +1335,7 @@ class Mutation:
     @require_authentication
     @jwt_required
     @require_api_secret
+    @require_settings_verified
     def verifyOtpForNewEmail(self, info, otp_code: str, new_email: str) -> str:
         try:
             user = info.context.request.user
@@ -2837,6 +2877,8 @@ class Mutation:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["business"])
+    @require_settings_verified
     def set_default_payment_method(self, info: Info, payment_method_id: str) -> DefaultPaymentMethodResponse:
         try:
             user = info.context.request.user
@@ -3172,6 +3214,147 @@ class Mutation:
             message=f"{count} notification(s) marked as read."
         )
 
+    # ─── Settings Access OTP ─────────────────────────────────────────────────────
+    # One OTP unlocks the whole Settings area for a fixed 10 minutes. The grant is
+    # stored server-side (SettingsAccess) and bound to the access token it was
+    # issued for. Protected Settings APIs check it with @require_settings_verified.
+
+    @strawberry.mutation
+    @require_api_secret
+    @require_authentication
+    @jwt_required
+    @require_role(["business"])
+    def request_settings_otp(self, info: Info) -> RequestPaymentOtpResponse:
+        """Sends the Settings OTP. Called only when the user clicks 'Verify & Continue'."""
+        try:
+            user = info.context.request.user
+            generate_and_send_otp(user, purpose="Settings Access")
+            return RequestPaymentOtpResponse(success=True, message="OTP sent to your registered email.")
+        except Exception as e:
+            raise GraphQLError(str(e))
+
+    @strawberry.mutation
+    @require_api_secret
+    @require_authentication
+    @jwt_required
+    @require_role(["business"])
+    def resend_settings_otp(self, info: Info) -> RequestPaymentOtpResponse:
+        """Resends the Settings OTP (same resend interval / cooldown; attempt counter is not reset)."""
+        try:
+            user = info.context.request.user
+            generate_and_send_otp(user, purpose="Settings Access")
+            return RequestPaymentOtpResponse(success=True, message="A new OTP has been sent to your email.")
+        except Exception as e:
+            raise GraphQLError(str(e))
+
+    @strawberry.mutation
+    @require_api_secret
+    @require_authentication
+    @jwt_required
+    @require_role(["business"])
+    def verify_settings_otp(self, info: Info, otp_code: str) -> VerifySettingsOtpResponse:
+        """
+        Verifies the Settings OTP.
+
+        - Correct OTP: opens a Settings session for exactly SettingsAccess.SESSION_MINUTES
+          from now, bound to this access token. It is never extended.
+        - Wrong / expired OTP: increments the attempt counter.
+        - 3rd wrong attempt: security email + all refresh tokens blacklisted (same as
+          the payment / password OTP flows), message LOCKED_OUT.
+        """
+        from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
+
+        MAX_SETTINGS_OTP_ATTEMPTS = 3
+
+        user = info.context.request.user
+        access, _ = SettingsAccess.objects.get_or_create(user=user)
+
+        if access.attempt_count >= MAX_SETTINGS_OTP_ATTEMPTS:
+            return VerifySettingsOtpResponse(success=False, message="LOCKED_OUT")
+
+        otp_record = OTP.objects.filter(user=user, otp_code=otp_code).first()
+
+        if not otp_record or otp_record.is_expired():
+            access.attempt_count += 1
+            access.save()
+            remaining = MAX_SETTINGS_OTP_ATTEMPTS - access.attempt_count
+
+            if remaining > 0:
+                return VerifySettingsOtpResponse(
+                    success=False,
+                    message=f"Invalid OTP. {remaining} attempt(s) remaining."
+                )
+
+            access.locked_at = timezone.now()
+            access.verified_until = None
+            access.verified_jti = ""
+            access.save()
+
+            full_name = f"{user.first_name} {user.last_name}"
+            try:
+                SESEmailSender().send_email(
+                    recipient=user.email,
+                    subject="Security Alert: Suspicious Activity on Your Account",
+                    body_text=(
+                        f"Hello {full_name},\n\n"
+                        f"We detected 3 failed attempts to unlock your account settings.\n"
+                        f"If this was not you, your account may be compromised.\n\n"
+                        f"Please reset your password immediately via account recovery:\n"
+                        f"Go to the login page and click 'Forgot Password'.\n\n"
+                        f"If this was you, you can ignore this email.\n\n"
+                        f"The TWAM Team"
+                    ),
+                    body_html=f"""
+                    <html><body>
+                        <p>Hello {full_name},</p>
+                        <p>We detected <strong>3 failed attempts</strong> to unlock your account settings.</p>
+                        <p>If this was <strong>not you</strong>, your account may be compromised.</p>
+                        <p><strong>Please reset your password immediately via account recovery.</strong><br>
+                        Go to the login page and click <em>Forgot Password</em>.</p>
+                        <p>If this was you, you can ignore this email.</p>
+                        <br>
+                        <p>The TWAM Team</p>
+                    </body></html>
+                    """,
+                )
+            except Exception as mail_err:
+                logger.error(f"Failed to send security email for user {user.email}: {mail_err}")
+
+            try:
+                for token in OutstandingToken.objects.filter(user=user):
+                    BlacklistedToken.objects.get_or_create(token=token)
+            except Exception as blacklist_err:
+                logger.error(f"Failed to blacklist tokens for user {user.email}: {blacklist_err}")
+
+            return VerifySettingsOtpResponse(success=False, message="LOCKED_OUT")
+
+        # Correct OTP: fixed window from this moment
+        otp_record.delete()
+        verified_at = timezone.now()
+        access.attempt_count = 0
+        access.locked_at = None
+        access.verified_until = verified_at + timedelta(minutes=SettingsAccess.SESSION_MINUTES)
+        access.verified_jti = get_access_token_jti(info) or ""
+        access.save()
+
+        return VerifySettingsOtpResponse(
+            success=True,
+            message="OTP verified successfully.",
+            expires_at=access.verified_until,
+            seconds_remaining=SettingsAccess.SESSION_MINUTES * 60,
+        )
+
+    @strawberry.mutation
+    @require_api_secret
+    @require_authentication
+    @jwt_required
+    def lock_settings_session(self, info: Info) -> bool:
+        """Ends the Settings session immediately (used on logout)."""
+        access = SettingsAccess.objects.filter(user=info.context.request.user).first()
+        if access:
+            access.clear_session()
+        return True
+
     # ── Business Deactivation ─────────────────────────────────────────────
 
     @strawberry.mutation
@@ -3179,6 +3362,7 @@ class Mutation:
     @require_authentication
     @jwt_required
     @require_role(["business"])
+    @require_settings_verified
     def deactivate_business_account(self, info: Info) -> DeactivateBusinessResponse:
         """
         Permanently deactivate a business account.

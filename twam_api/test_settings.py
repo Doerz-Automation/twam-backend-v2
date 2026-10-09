@@ -67,8 +67,8 @@ else:
 # __all__ = ['env']
 
 # Load environment variables
-SECRET_KEY = "django-insecure-k4=cb+x_0xscqf@$#6a8tz-j22fy8y!*qtq(2hgu9-p46wc6pq"
-API_SECRET_KEY = "PWa6Nq51HnWRzh2gXHtJR25wHIv4muGA"
+SECRET_KEY = "test-only-secret-key-never-used-outside-the-test-suite"
+API_SECRET_KEY = "test-only-api-secret"
 OTP_RESEND_INTERVAL = 30
 OTP_MAX_RETRIES = 3
 OTP_COOLDOWN_PERIOD = 1800
@@ -139,31 +139,14 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "twam_api.wsgi.application"
 
+# Tests run on an in-memory SQLite database (ArrayField is mocked above), so
+# they never need a real database or any credentials.
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': "twam_db",
-        'USER': "postgres",
-        'PASSWORD': "9LSsIQtikUQsXpQ3VYda",
-        'HOST': "twam-db.ccz4m4wmiwd7.us-east-1.rds.amazonaws.com",
-        'PORT': env('DB_PORT', default=5432, cast=int)
-
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": ":memory:",
     }
 }
-
-        # 'HOST': "127.0.0.1",  # <- use local tunnel
-        # 'PORT': 5544           # <- local forwarded port
-
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.postgresql',
-#         'NAME': "twam_db",
-#         'USER': "postgres",
-#         'PASSWORD': "123456",
-#         'HOST': 'localhost',
-#         'PORT': "5432"
-#     }
-# }
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(days=7),
