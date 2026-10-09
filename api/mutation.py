@@ -32,7 +32,7 @@ from django.utils.timezone import now
 from django.core.mail import send_mail
 from django.contrib.auth import authenticate
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
-from api.utils import SESEmailSender, generate_jwt_token, generate_and_send_otp, generate_report_id
+from api.utils import SESEmailSender, generate_jwt_token, generate_and_send_otp, generate_report_id, normalize_na_phone
 from api.stripe_services import create_stripe_customer, cancel_subscription, create_setup_intent, set_customer_default_payment_method
 from api.decorators import (jwt_required, require_api_secret, require_authentication, require_role, require_not_suspended,
                             require_settings_verified, assert_settings_verified, get_access_token_jti)
@@ -65,6 +65,27 @@ def compute_master_clock_expiry(end_date):
 MAX_LISTING_IMAGES = 2
 
 
+def _business_profile_is_complete(profile) -> bool:
+    """Same fields the portal requires before a business can operate (mirrors the
+    frontend's isBusinessProfileComplete)."""
+    return bool(
+        profile.category_id
+        and profile.address
+        and profile.business_name
+        and profile.city
+        and profile.description
+        and profile.longitude
+        and profile.logo_url
+        and profile.latitude
+        and profile.payment_methods
+        and profile.phone
+        and profile.state
+        and profile.subcategories
+        and profile.zip_code
+        and profile.business_hours.exists()
+    )
+
+
 @strawberry.type
 class Mutation:
     @strawberry.mutation
@@ -72,6 +93,8 @@ class Mutation:
     def register(self, info: Info, input: RegisterInput) -> UserType:
         first_name = input.first_name or ""
         last_name = input.last_name or ""
+        # Canada/US numbers only: +1 and exactly 10 digits, stored as +1XXXXXXXXXX
+        personal_phone = normalize_na_phone(input.personal_phone)
 
         user = User.objects.create_user(
             email=input.email.strip().lower(),
@@ -81,7 +104,7 @@ class Mutation:
             role=input.role,
             is_active=False,
             is_verified=False,
-            personal_phone=input.personal_phone or "",
+            personal_phone=personal_phone,
         )
 
         if input.role == "user":
@@ -397,10 +420,11 @@ class Mutation:
         user = request.user
         business_profile = user.business_profile
 
-        # Onboarding (before admin approval) is not part of Settings. Once the
-        # account is approved, every profile edit is a Settings edit and needs
-        # an active Settings verification session.
-        if user.is_admin_approved:
+        # Profile setup (the onboarding wizard) is not part of Settings. Once
+        # the account is approved AND its profile is complete, every profile
+        # edit is a Settings edit and needs an active Settings session. An
+        # approved business that has not finished setup can still finish it.
+        if user.is_admin_approved and _business_profile_is_complete(business_profile):
             assert_settings_verified(info)
 
         # Update basic fields
