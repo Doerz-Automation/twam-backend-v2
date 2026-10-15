@@ -225,6 +225,39 @@ def generate_report_id():
     return str(random.randint(10000000, 99999999))
 
 
+def last_finalized_billing_day():
+    """
+    The latest day whose billing is final. Billing runs on the Toronto 3 AM
+    master clock, so before 3 AM Toronto "today" is not finished yet and the
+    last finalized day is yesterday. Same rule the Daily Channel Spend view uses.
+    """
+    import zoneinfo
+    now_toronto = datetime.now(zoneinfo.ZoneInfo("America/Toronto"))
+    day = now_toronto.date()
+    return day - timedelta(days=1) if now_toronto.hour < 3 else day
+
+
+def ad_spend_through(ad, through_date):
+    """
+    What one advertisement has cost from its start date up to `through_date`
+    (or its end date if that is earlier), with flagged days not charged.
+    Uses Advertisement.get_daily_rate, so it always agrees with the billing
+    queries. The caller should prefetch the channel discount and price history.
+    """
+    last_day = min(ad.end_date, through_date) if ad.end_date else through_date
+    if ad.start_date > last_day:
+        return Decimal("0.00")
+
+    flagged_days = calculate_flagged_days(ad, ad.start_date, last_day)
+    total = Decimal("0.00")
+    day = ad.start_date
+    while day <= last_day:
+        if day not in flagged_days:
+            total += ad.get_daily_rate(day)
+        day += timedelta(days=1)
+    return total
+
+
 def normalize_na_phone(value):
     """
     Validate a Canada/US phone number and return it as +1XXXXXXXXXX.

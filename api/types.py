@@ -905,6 +905,9 @@ class BillingSummaryType:
     current_month_cost: float
     billing_period_start: date
     invoices: List[MonthlyInvoiceType]
+    # Everything spent on ads from their start dates up to spend_through_date
+    total_spend_to_date: float = 0.0
+    spend_through_date: Optional[date] = None
 
 
 @strawberry.type
