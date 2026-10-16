@@ -911,6 +911,45 @@ class BillingSummaryType:
 
 
 @strawberry.type
+class AdSpendSegmentType:
+    channel_name: str
+    start_date: date
+    end_date: date
+    days: int
+    price_per_day: float
+    discount: float
+    cost: float
+    flagged: bool
+
+
+@strawberry.type
+class AdSpendItemType:
+    advertisement_id: int
+    advertisement_name: str
+    status: str
+    start_date: date
+    end_date: Optional[date] = None
+    period_start: date
+    period_end: date
+    days: int
+    flagged_days: int
+    subtotal: float
+    savings: float
+    segments: List[AdSpendSegmentType]
+
+
+@strawberry.type
+class AdSpendMonthType:
+    month: str
+    through_date: Optional[date] = None
+    earliest_month: Optional[str] = None
+    total: float
+    savings: float
+    flagged_days: int
+    ads: List[AdSpendItemType]
+
+
+@strawberry.type
 class ChannelDailySpendType:
     channel_name: str
     price_per_day: float
