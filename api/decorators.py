@@ -118,10 +118,6 @@ def assert_settings_verified(info):
     from graphql import GraphQLError
     from .models import SettingsAccess
 
-    from django.conf import settings as django_settings
-    if getattr(django_settings, "DISABLE_SETTINGS_OTP", False):
-        return
-
     user = info.context.request.user
     # The Settings OTP session protects the Business Portal only. Consumer app
     # users (role "user") and admins share change-password / change-email but
