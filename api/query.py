@@ -12,7 +12,7 @@ from api.types import (ReportedItemsType, ReportedListingsType,
                        AdvertisementChannelReturnType, AdvertisementChannelType, AdvertisementReturnType, AdvertisementType, AdvertisementWithChannlesReturnType, BusinessHoursReturnType, BusinessHoursType, BusinessProfileDetailsType, BusinessProfileReturnType, BusinessProfileType, BusinessSubCategoryType, BusinessUserProfileType, ChannelAdvertisementReturnType, ChannelDetailsType, ChannelType, ChannelWithAdsType, ClientLocationType, ClientProfileType, ContactInfoType, ListingType, LocationType,
                        ProfileType, ReportedAdsType, ReportsResponseType, SuspensionType, UserReportsType, UserType, BusinessCategoryType, AdvertisementFlagType, PaymentMethodType,
                        BillingSummaryType, MonthlyInvoiceType, NotificationType,
-                       ChannelDailySpendType, DayBillingType, SettingsSessionStatusType
+                       ChannelDailySpendType, DayBillingType, SettingsSessionStatusType, AdSpendMonthType, AdSpendItemType, AdSpendSegmentType
                        )
 from api.models import (
     Advertisement, AdvertisementChannel, AdvertisementReports, BusinessProfile, ClientProfile, LikedAdvertisement, ListingReports, Suspension, LikedBusinessProfile, Listings, User, Profile, BusinessCategory, AdvertisementFlag, AdvertisementChannelAssignment, MonthlyInvoice
@@ -131,6 +131,59 @@ class Query:
             invoices=invoice_types,
             total_spend_to_date=float(total_spend),
             spend_through_date=through_date,
+        )
+
+    @strawberry.field
+    @require_api_secret
+    @require_authentication
+    @jwt_required
+    @require_role(["business"])
+    @require_settings_verified
+    def ad_spending(self, info: Info, month: str) -> AdSpendMonthType:
+        """What each advertisement cost in one month ("YYYY-MM"), with its channel,
+        price and discount rows. Counted up to the last finalized billing day."""
+        from api.ad_spend import build_ad_spend, earliest_spend_month, month_total
+
+        try:
+            year, month_num = map(int, month.split("-"))
+            date(year, month_num, 1)
+        except (ValueError, TypeError):
+            raise GraphQLError("Month must look like 2026-10.")
+
+        user = info.context.request.user
+        through = last_finalized_billing_day()
+        entries = build_ad_spend(user, year, month_num, through)
+
+        items = [
+            AdSpendItemType(
+                advertisement_id=e.advertisement.id,
+                advertisement_name=e.advertisement.advertisment_name,
+                status=e.advertisement.advertisement_status,
+                start_date=e.advertisement.start_date,
+                end_date=e.advertisement.end_date,
+                period_start=e.period_start,
+                period_end=e.period_end,
+                days=e.days,
+                flagged_days=e.flagged_days,
+                subtotal=float(e.subtotal),
+                savings=float(e.savings),
+                segments=[
+                    AdSpendSegmentType(
+                        channel_name=s.channel_name, start_date=s.start_date, end_date=s.end_date, days=s.days,
+                        price_per_day=float(s.price_per_day), discount=float(s.discount),
+                        cost=float(s.raw_cost.quantize(Decimal("0.01"))), flagged=s.flagged,
+                    ) for s in e.segments
+                ],
+            ) for e in entries
+        ]
+        return AdSpendMonthType(
+            month=month,
+            through_date=through,
+            earliest_month=earliest_spend_month(user),
+            total=float(month_total(entries)),
+            savings=float(sum((e.savings for e in entries), Decimal("0.00"))),
+            flagged_days=sum(e.flagged_days for e in entries),
+            ads=items,
         )
 
     @strawberry.field

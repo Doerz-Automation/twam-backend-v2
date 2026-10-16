@@ -407,6 +407,49 @@ class AdvertisementChannel(models.Model):
             
         return True
 
+    def rate_for_date(self, for_date):
+        """
+        What this channel costs on one day: (base price, discount percent, price
+        after discount). The base price comes from ChannelPriceHistory and the
+        discount from ChannelDiscountHistory; channels without history rows fall
+        back to their current fields. This is the single place the daily price is
+        worked out: Advertisement.get_daily_rate and the ad spend breakdown both
+        use it, so billing and what the business sees always agree.
+
+        Callers should prefetch price_history and discount_history.
+        """
+        from decimal import Decimal
+
+        price_records = sorted(
+            [p for p in self.price_history.all()
+             if p.effective_from <= for_date and (p.effective_until is None or p.effective_until >= for_date)],
+            key=lambda x: x.effective_from, reverse=True
+        )
+        base = Decimal(str(price_records[0].price_per_day)) if price_records else Decimal(str(self.price_per_day))
+
+        # all() reads from the prefetch cache, so there is no extra DB hit
+        all_discount_history = list(self.discount_history.all())
+        valid_discounts = sorted(
+            [h for h in all_discount_history
+             if h.effective_from <= for_date and (h.effective_until is None or h.effective_until >= for_date)],
+            key=lambda x: x.effective_from, reverse=True
+        )
+
+        if valid_discounts:
+            apply_disc = valid_discounts[0].apply_discount
+            disc_price = Decimal(str(valid_discounts[0].discount_price))
+        elif all_discount_history:
+            apply_disc = False
+            disc_price = None
+        else:
+            # Legacy channel with no history rows
+            apply_disc = self.apply_discount
+            disc_price = Decimal(str(self.discount_price)) if self.discount_price else None
+
+        if apply_disc and disc_price:
+            return base, disc_price, base - (base * disc_price) / Decimal('100.00')
+        return base, Decimal('0.00'), base
+
     def get_discount_status_message(self):
         """Returns the dynamic discount message requested by the user"""
         if not self.apply_discount:
@@ -596,36 +639,7 @@ class Advertisement(models.Model):
             if channel.end_date and for_date > channel.end_date:
                 continue
 
-            # Resolve base price from history; fall back to current value for legacy channels
-            price_records = sorted(
-                [p for p in channel.price_history.all()
-                 if p.effective_from <= for_date and (p.effective_until is None or p.effective_until >= for_date)],
-                key=lambda x: x.effective_from, reverse=True
-            )
-            price = Decimal(str(price_records[0].price_per_day)) if price_records else Decimal(str(channel.price_per_day))
-
-            # Resolve discount from history (all() reads from prefetch cache — no extra DB hit)
-            all_discount_history = list(channel.discount_history.all())
-            valid_discounts = sorted(
-                [h for h in all_discount_history
-                 if h.effective_from <= for_date and (h.effective_until is None or h.effective_until >= for_date)],
-                key=lambda x: x.effective_from, reverse=True
-            )
-
-            if valid_discounts:
-                apply_disc = valid_discounts[0].apply_discount
-                disc_price = Decimal(str(valid_discounts[0].discount_price))
-            elif all_discount_history:
-                apply_disc = False
-                disc_price = None
-            else:
-                # Legacy channel with no history rows
-                apply_disc = channel.apply_discount
-                disc_price = Decimal(str(channel.discount_price)) if channel.discount_price else None
-
-            if apply_disc and disc_price:
-                price = price - (price * disc_price) / Decimal('100.00')
-
+            _base, _discount, price = channel.rate_for_date(for_date)
             daily_rate += price
 
         return daily_rate
