@@ -1244,6 +1244,7 @@ class Notification(models.Model):
         ("account_suspended", "Account Suspended"),
         ("business_approved", "Business Account Approved"),
         ("business_approved_billing_reminder", "Business Approved - Billing Reminder"),
+        ("payment_setup_complete", "Payment Setup Complete"),
         ("ad_phased_out", "Advertisement Phased Out"),
     ]
 

@@ -188,6 +188,26 @@ class Mutation:
         user = info.context.request.user
         return create_setup_intent(user)
 
+    @strawberry.mutation
+    @require_api_secret
+    @require_authentication
+    @jwt_required
+    @require_role(["business"])
+    def confirm_payment_method_added(self, info: Info) -> bool:
+        """
+        Called by the app after Stripe confirms a new card. Sends the "payment
+        setup complete" notification if the business is approved and the card
+        is really on file. Safe to call more than once: it only sends once.
+        """
+        from api.notification_service import notify_payment_setup_complete
+
+        try:
+            return notify_payment_setup_complete(info.context.request.user)
+        except Exception as e:
+            # A failed notification must never fail adding a card
+            logger.error(f"Payment setup notification failed: {str(e)}")
+            return False
+
 
     @strawberry.mutation
     @require_authentication
@@ -1252,6 +1272,15 @@ class Mutation:
                     "Invoices & Payments > Update Card."
                 ),
             )
+
+            # A business that already has a card on file when it is approved
+            # gets the payment setup confirmation straight away, as its own
+            # notification. Never let it block the approval.
+            try:
+                from api.notification_service import notify_payment_setup_complete
+                notify_payment_setup_complete(user_to_approve)
+            except Exception as e:
+                logger.error(f"Payment setup notification failed: {str(e)}")
 
             return SuccessUserApprovalType(
                 id=user_to_approve.id,
