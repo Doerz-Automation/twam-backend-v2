@@ -207,3 +207,8 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# TEMPORARY, for testing: set DISABLE_SETTINGS_OTP=True in the environment to skip
+# the Business Portal Settings OTP. Off by default, so the OTP is required
+# everywhere this variable is not set. Remove it again once testing is done.
+DISABLE_SETTINGS_OTP = env.bool('DISABLE_SETTINGS_OTP', default=False)

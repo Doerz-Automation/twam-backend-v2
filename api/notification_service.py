@@ -89,3 +89,42 @@ def create_bulk_notifications(
     logger.info(
         f"Bulk notification created: type={notification_type}, count={len(objs)}"
     )
+
+
+PAYMENT_SETUP_COMPLETE_TITLE = "Payment Setup Complete"
+PAYMENT_SETUP_COMPLETE_MESSAGE = (
+    "Payment method added successfully. You now have access to all features!"
+)
+
+
+def notify_payment_setup_complete(user) -> bool:
+    """
+    Tell an approved business that its payment setup is done.
+
+    Sent once, and only when both are true: a TWAM admin has approved the
+    business and it has a card on file (checked with Stripe). It is a separate
+    notification from the approval ones, so it can be triggered from either
+    side: after a card is added, or when an admin approves a business that
+    already has a card. Returns True when a notification was created.
+    """
+    from api.models import Notification
+    from api.stripe_services import get_user_payment_methods
+
+    if getattr(user, "role", None) != "business" or not user.is_admin_approved:
+        return False
+
+    if Notification.objects.filter(
+        recipient=user, notification_type="payment_setup_complete"
+    ).exists():
+        return False
+
+    if not (get_user_payment_methods(user) or []):
+        return False
+
+    create_notification(
+        recipient=user,
+        notification_type="payment_setup_complete",
+        title=PAYMENT_SETUP_COMPLETE_TITLE,
+        message=PAYMENT_SETUP_COMPLETE_MESSAGE,
+    )
+    return True

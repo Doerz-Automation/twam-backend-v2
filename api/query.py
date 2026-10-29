@@ -409,7 +409,11 @@ class Query:
     @jwt_required
     def settings_session_status(self, info: Info) -> SettingsSessionStatusType:
         """Whether the caller currently holds an active Settings OTP session. Returns no sensitive data."""
+        from django.conf import settings as django_settings
         from api.models import SettingsAccess
+        if getattr(django_settings, "DISABLE_SETTINGS_OTP", False):
+            return SettingsSessionStatusType(
+                verified=True, expires_at=timezone.now() + timedelta(days=1), seconds_remaining=86400)
         access = SettingsAccess.objects.filter(user=info.context.request.user).first()
         if not access or not access.is_valid_for(get_access_token_jti(info)):
             return SettingsSessionStatusType(verified=False, expires_at=None, seconds_remaining=0)
