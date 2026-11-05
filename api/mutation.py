@@ -237,6 +237,8 @@ class Mutation:
 
     @strawberry.mutation
     @require_api_secret
+    @require_authentication
+    @jwt_required
     def trigger_channel_status_update(self, info: Info) -> str:
         """Manually trigger the channel/ad status update job"""
         from api.scheduler import update_channel_status
@@ -642,7 +644,10 @@ class Mutation:
             raise GraphQLError(f"Could not update category: {str(e)}")
         
     @strawberry.mutation
-    def update_business_category(self, input: UpdateCategoryInput) -> Optional[BusinessCategoryType]:
+    @require_api_secret
+    @require_authentication
+    @jwt_required
+    def update_business_category(self, info: Info, input: UpdateCategoryInput) -> Optional[BusinessCategoryType]:
         try:
             category = BusinessCategory.objects.get(pk=input.id)
             category.name = input.name
@@ -656,7 +661,10 @@ class Mutation:
             raise Exception(f"Could not update category: {e}")
 
     @strawberry.mutation
-    def delete_business_category(self, id: strawberry.ID) -> bool:
+    @require_api_secret
+    @require_authentication
+    @jwt_required
+    def delete_business_category(self, info: Info, id: strawberry.ID) -> bool:
         try:
             category = BusinessCategory.objects.get(pk=id)
             category.delete()
@@ -668,7 +676,24 @@ class Mutation:
 
     @strawberry.mutation
     @require_api_secret
+    @require_authentication
+    @jwt_required
+    @require_role(["admin"])
     def create_admin(self, info: Info, first_name: str, last_name: str, email: str, password: str) -> UserType:
+        """Only a logged-in admin can create another admin. (The API secret is
+        shipped to every browser, so it cannot be what protects this.) The first
+        admin has to be created from the server: `python manage.py shell`."""
+        from django.contrib.auth.password_validation import validate_password
+        from django.core.exceptions import ValidationError
+
+        email = email.strip().lower()
+        if User.objects.filter(email=email).exists():
+            raise GraphQLError("A user with this email already exists.")
+        try:
+            validate_password(password)
+        except ValidationError as e:
+            raise GraphQLError(" ".join(e.messages))
+
         try:
             user = User.objects.create_user(
                 email=email,
