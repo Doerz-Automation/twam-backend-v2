@@ -35,7 +35,8 @@ from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from api.utils import SESEmailSender, generate_jwt_token, generate_and_send_otp, generate_report_id, normalize_na_phone
 from api.stripe_services import create_stripe_customer, cancel_subscription, create_setup_intent, set_customer_default_payment_method
 from api.decorators import (jwt_required, require_api_secret, require_authentication, require_role, require_not_suspended,
-                            require_settings_verified, assert_settings_verified, get_access_token_jti)
+                            require_settings_verified, assert_settings_verified, get_access_token_jti,
+                            require_admin_approved)
 from twam_api import settings
 from graphql import GraphQLError
 from django.contrib.auth import get_user_model
@@ -1399,6 +1400,7 @@ class Mutation:
     @require_authentication
     @jwt_required
     @require_not_suspended
+    @require_admin_approved
     def create_advertisement(self, info, input: AdvertisementInput) -> AdvertisementSuccessType:
         user = info.context.request.user
         if user.role != "business":
@@ -1539,6 +1541,7 @@ class Mutation:
     @require_authentication
     @jwt_required
     @require_not_suspended
+    @require_admin_approved
     def create_listings(self, info, input: CreateListingInput) -> ListingSuccessType:
         user = info.context.request.user
         if user.role != "business":
