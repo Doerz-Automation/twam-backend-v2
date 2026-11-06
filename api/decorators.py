@@ -96,6 +96,28 @@ def require_not_suspended(func):
     return wrapper
 
 
+ADMIN_APPROVAL_REQUIRED_MESSAGE = (
+    "Your business account is waiting for admin approval. "
+    "You can create advertisements once it has been approved."
+)
+
+
+def require_admin_approved(func):
+    """
+    Business accounts must be approved by a TWAM admin before they create ads
+    or free daily ads. The portal hides the buttons, but this is the check that
+    actually stops a request sent straight to the API.
+    """
+    @wraps(func)
+    def wrapper(self, info: Info, *args, **kwargs):
+        from graphql import GraphQLError
+        user = info.context.request.user
+        if user.is_authenticated and user.role == "business" and not user.is_admin_approved:
+            raise GraphQLError(ADMIN_APPROVAL_REQUIRED_MESSAGE)
+        return func(self, info, *args, **kwargs)
+    return wrapper
+
+
 SETTINGS_VERIFICATION_REQUIRED = "SETTINGS_VERIFICATION_REQUIRED"
 
 
