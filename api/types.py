@@ -681,6 +681,7 @@ class CreateListingInput:
     listing_description: Optional[str] = ""
     listing_image: Optional[List[str]] = None
     listing_status: Optional[str] = "active"
+    reused_from_id: Optional[int] = None
 
 
 @strawberry.type
@@ -703,6 +704,7 @@ class ListingType:
     flag: Optional[ListingFlagType] = None
     is_reported: Optional[bool] = None
     is_flagged: Optional[bool] = None
+    has_been_reused: bool = False
 
 
 @strawberry.input

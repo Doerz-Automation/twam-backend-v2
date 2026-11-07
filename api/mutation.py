@@ -1578,12 +1578,33 @@ class Mutation:
                 f"A listing can have at most {MAX_LISTING_IMAGES} photos.")
 
         try:
+            # --- Reuse Constraints ---
+            if input.reused_from_id:
+                source = Listings.objects.filter(
+                    id=input.reused_from_id, user=user).first()
+                if not source:
+                    raise GraphQLError(
+                        "The free daily ad you are trying to reuse does not exist.")
+                if source.listing_status == "active":
+                    raise GraphQLError(
+                        "Cannot reuse an active free daily ad. "
+                        "The original must be phased out before it can be reused.")
+                if source.reused_to.exists():
+                    raise GraphQLError(
+                        "This free daily ad has already been reused. "
+                        "A free daily ad can only be used as a source once.")
+                if Listings.objects.filter(user=user, listing_status="active").exists():
+                    raise GraphQLError(
+                        "You already have an active free daily ad. "
+                        "Please wait for it to end before reusing another.")
+
             listing = Listings.objects.create(
                 user=user,
                 listing_name=input.listing_name,
                 listing_description=input.listing_description or "",
                 listing_image=input.listing_image or [],
-                listing_status=input.listing_status if input.listing_status else "active"
+                listing_status=input.listing_status if input.listing_status else "active",
+                reused_from_id=input.reused_from_id,
             )
 
             return ListingSuccessType(id=listing.id, message="Listing created successfully")

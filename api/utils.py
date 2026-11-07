@@ -582,4 +582,5 @@ def build_listing_response(listing: Listings) -> ListingType:
         business_profile=business_profile_data,
         flag=flag_obj,
         is_reported=listing.is_reported,is_flagged=is_flagged,
+        has_been_reused=listing.reused_to.exists(),
     )
