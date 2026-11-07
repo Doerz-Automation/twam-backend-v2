@@ -64,6 +64,7 @@ def compute_master_clock_expiry(end_date):
 
 
 MAX_LISTING_IMAGES = 2
+MAX_AD_IMAGES = 3
 
 
 def _business_profile_is_complete(profile) -> bool:
@@ -1457,6 +1458,8 @@ class Mutation:
             # --- Image Validation ---
             if not input.advertisement_image or len(input.advertisement_image) == 0:
                 raise GraphQLError("At least one advertisement image is required.")
+            if len(input.advertisement_image) > MAX_AD_IMAGES:
+                raise GraphQLError(f"You can add up to {MAX_AD_IMAGES} images per advertisement.")
 
             # 1. Create or get Stripe Customer
             stripe_customer_id = create_stripe_customer(user)
@@ -1687,6 +1690,8 @@ class Mutation:
             # --- Image Validation ---
             if input.advertisement_image is not None and len(input.advertisement_image) == 0:
                 raise GraphQLError("At least one advertisement image is required.")
+            if input.advertisement_image is not None and len(input.advertisement_image) > MAX_AD_IMAGES:
+                raise GraphQLError(f"You can add up to {MAX_AD_IMAGES} images per advertisement.")
 
             # Fields to update dynamically
             updatable_fields = [
