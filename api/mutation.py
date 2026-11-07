@@ -32,7 +32,7 @@ from django.utils.timezone import now
 from django.core.mail import send_mail
 from django.contrib.auth import authenticate
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
-from api.utils import SESEmailSender, generate_jwt_token, generate_and_send_otp, generate_report_id, normalize_na_phone
+from api.utils import SESEmailSender, generate_jwt_token, generate_and_send_otp, generate_report_id, normalize_na_phone, assert_account_allowed_in_app
 from api.stripe_services import create_stripe_customer, cancel_subscription, create_setup_intent, set_customer_default_payment_method
 from api.decorators import (jwt_required, require_api_secret, require_authentication, require_role, require_not_suspended,
                             require_settings_verified, assert_settings_verified, get_access_token_jti,
@@ -329,6 +329,8 @@ class Mutation:
                 raise GraphQLError(
                     "OTP has expired. Please request a new one.")
 
+            assert_account_allowed_in_app(info, user)
+
             user.is_verified = True
             # Business users need is_active=True to log in after email
             # verification. Admin approval (is_admin_approved) controls
@@ -351,7 +353,7 @@ class Mutation:
                 role=user.role,
                 is_verified=user.is_verified,
                 is_active=user.is_active,
-                is_admin_approved=user.is_admin_approved,
+                is_admin_approved=bool(user.is_admin_approved),
             )
         except User.DoesNotExist:
             raise GraphQLError("User not found.")
@@ -394,6 +396,10 @@ class Mutation:
             if not user.check_password(input.password):
                 raise Exception("Invalid email or password")
 
+            # Business and admin accounts do not use the mobile app. Checked after
+            # the password so a wrong password never reveals the account type.
+            assert_account_allowed_in_app(info, user)
+
             # Generate JWT tokens
             tokens = generate_jwt_token(user)
 
@@ -415,7 +421,7 @@ class Mutation:
                 role=user.role,
                 is_verified=user.is_verified,
                 is_active=user.is_active,
-                is_admin_approved=user.is_admin_approved,
+                is_admin_approved=bool(user.is_admin_approved),
             )
         except User.DoesNotExist:
             raise Exception("User with this email does not exist")
