@@ -221,6 +221,29 @@ def validate_api_secret(info) -> None:
         raise Exception("Invalid or missing API secret")
 
 
+MOBILE_CLIENT_HEADER = "X-Client-App"
+
+
+def assert_account_allowed_in_app(info, user) -> None:
+    """
+    The mobile app is for consumer accounts only. The app announces itself with
+    the X-Client-App: mobile header, and a business or admin account that tries
+    to sign in from it is refused with a clear message. Requests without the
+    header (the web portal, tools) are not affected.
+    """
+    from graphql import GraphQLError
+
+    request = info.context["request"]
+    if request.headers.get(MOBILE_CLIENT_HEADER, "").strip().lower() != "mobile":
+        return
+    if user.role == "business":
+        raise GraphQLError(
+            "This is a business account. Please sign in to the TWAM Business Portal on the web."
+        )
+    if user.role != "user":
+        raise GraphQLError("This account cannot sign in to the mobile app.")
+
+
 def generate_report_id():
     return str(random.randint(10000000, 99999999))
 
@@ -582,4 +605,5 @@ def build_listing_response(listing: Listings) -> ListingType:
         business_profile=business_profile_data,
         flag=flag_obj,
         is_reported=listing.is_reported,is_flagged=is_flagged,
+        has_been_reused=listing.reused_to.exists(),
     )

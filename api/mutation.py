@@ -32,7 +32,7 @@ from django.utils.timezone import now
 from django.core.mail import send_mail
 from django.contrib.auth import authenticate
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
-from api.utils import SESEmailSender, generate_jwt_token, generate_and_send_otp, generate_report_id, normalize_na_phone
+from api.utils import SESEmailSender, generate_jwt_token, generate_and_send_otp, generate_report_id, normalize_na_phone, assert_account_allowed_in_app
 from api.stripe_services import create_stripe_customer, cancel_subscription, create_setup_intent, set_customer_default_payment_method
 from api.decorators import (jwt_required, require_api_secret, require_authentication, require_role, require_not_suspended,
                             require_settings_verified, assert_settings_verified, get_access_token_jti,
@@ -64,6 +64,7 @@ def compute_master_clock_expiry(end_date):
 
 
 MAX_LISTING_IMAGES = 2
+MAX_AD_IMAGES = 3
 
 
 def _business_profile_is_complete(profile) -> bool:
@@ -328,6 +329,8 @@ class Mutation:
                 raise GraphQLError(
                     "OTP has expired. Please request a new one.")
 
+            assert_account_allowed_in_app(info, user)
+
             user.is_verified = True
             # Business users need is_active=True to log in after email
             # verification. Admin approval (is_admin_approved) controls
@@ -350,7 +353,7 @@ class Mutation:
                 role=user.role,
                 is_verified=user.is_verified,
                 is_active=user.is_active,
-                is_admin_approved=user.is_admin_approved,
+                is_admin_approved=bool(user.is_admin_approved),
             )
         except User.DoesNotExist:
             raise GraphQLError("User not found.")
@@ -393,6 +396,10 @@ class Mutation:
             if not user.check_password(input.password):
                 raise Exception("Invalid email or password")
 
+            # Business and admin accounts do not use the mobile app. Checked after
+            # the password so a wrong password never reveals the account type.
+            assert_account_allowed_in_app(info, user)
+
             # Generate JWT tokens
             tokens = generate_jwt_token(user)
 
@@ -414,7 +421,7 @@ class Mutation:
                 role=user.role,
                 is_verified=user.is_verified,
                 is_active=user.is_active,
-                is_admin_approved=user.is_admin_approved,
+                is_admin_approved=bool(user.is_admin_approved),
             )
         except User.DoesNotExist:
             raise Exception("User with this email does not exist")
@@ -1457,6 +1464,8 @@ class Mutation:
             # --- Image Validation ---
             if not input.advertisement_image or len(input.advertisement_image) == 0:
                 raise GraphQLError("At least one advertisement image is required.")
+            if len(input.advertisement_image) > MAX_AD_IMAGES:
+                raise GraphQLError(f"You can add up to {MAX_AD_IMAGES} images per advertisement.")
 
             # 1. Create or get Stripe Customer
             stripe_customer_id = create_stripe_customer(user)
@@ -1578,12 +1587,33 @@ class Mutation:
                 f"A listing can have at most {MAX_LISTING_IMAGES} photos.")
 
         try:
+            # --- Reuse Constraints ---
+            if input.reused_from_id:
+                source = Listings.objects.filter(
+                    id=input.reused_from_id, user=user).first()
+                if not source:
+                    raise GraphQLError(
+                        "The free daily ad you are trying to reuse does not exist.")
+                if source.listing_status == "active":
+                    raise GraphQLError(
+                        "Cannot reuse an active free daily ad. "
+                        "The original must be phased out before it can be reused.")
+                if source.reused_to.exists():
+                    raise GraphQLError(
+                        "This free daily ad has already been reused. "
+                        "A free daily ad can only be used as a source once.")
+                if Listings.objects.filter(user=user, listing_status="active").exists():
+                    raise GraphQLError(
+                        "You already have an active free daily ad. "
+                        "Please wait for it to end before reusing another.")
+
             listing = Listings.objects.create(
                 user=user,
                 listing_name=input.listing_name,
                 listing_description=input.listing_description or "",
                 listing_image=input.listing_image or [],
-                listing_status=input.listing_status if input.listing_status else "active"
+                listing_status=input.listing_status if input.listing_status else "active",
+                reused_from_id=input.reused_from_id,
             )
 
             return ListingSuccessType(id=listing.id, message="Listing created successfully")
@@ -1666,6 +1696,8 @@ class Mutation:
             # --- Image Validation ---
             if input.advertisement_image is not None and len(input.advertisement_image) == 0:
                 raise GraphQLError("At least one advertisement image is required.")
+            if input.advertisement_image is not None and len(input.advertisement_image) > MAX_AD_IMAGES:
+                raise GraphQLError(f"You can add up to {MAX_AD_IMAGES} images per advertisement.")
 
             # Fields to update dynamically
             updatable_fields = [

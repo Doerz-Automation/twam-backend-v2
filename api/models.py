@@ -691,6 +691,15 @@ class Listings(models.Model):
         choices=STATUS_CHOICES,
         default="action not taken"
     )
+    # Traceability for reused free daily ads
+    reused_from = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reused_to',
+        help_text="The original free daily ad this one was reused from."
+    )
 
     class Meta:
         verbose_name = "Listing"
