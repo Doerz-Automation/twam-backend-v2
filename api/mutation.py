@@ -34,6 +34,7 @@ from django.contrib.auth import authenticate
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from api.utils import SESEmailSender, generate_jwt_token, generate_and_send_otp, generate_report_id, normalize_na_phone, assert_account_allowed_in_app
 from api.stripe_services import create_stripe_customer, cancel_subscription, create_setup_intent, set_customer_default_payment_method
+from api.rate_limit import HOUR, MINUTE, by_email, by_ip, by_user, rate_limit
 from api.decorators import (jwt_required, require_api_secret, require_authentication, require_role, require_not_suspended,
                             require_settings_verified, assert_settings_verified, get_access_token_jti,
                             require_admin_approved)
@@ -88,10 +89,26 @@ def _business_profile_is_complete(profile) -> bool:
     )
 
 
+def _business_is_past_setup(user) -> bool:
+    """True once a business is operating: it has an ad or a free daily ad, or it has
+    opened Settings (which creates its SettingsAccess record).
+
+    The profile becomes "complete" part-way through the setup wizard (older signups
+    already hold a category, so finishing Location and Business Info is enough), yet
+    the wizard still has to save the Business Category step afterwards. Completeness
+    alone would therefore lock the business out of finishing its own setup."""
+    return (
+        user.advertisements.exists()
+        or user.listings.exists()
+        or SettingsAccess.objects.filter(user=user).exists()
+    )
+
+
 @strawberry.type
 class Mutation:
     @strawberry.mutation
     @require_api_secret
+    @rate_limit("register-ip", key=by_ip, limit=10, window=HOUR)
     def register(self, info: Info, input: RegisterInput) -> UserType:
         first_name = input.first_name or ""
         last_name = input.last_name or ""
@@ -149,6 +166,7 @@ class Mutation:
 
     @strawberry.mutation
     @require_api_secret
+    @rate_limit("send-otp-ip", key=by_ip, limit=20, window=HOUR)
     def resend_otp(self, info: Info, email: str) -> ResendOTPResponse:
         try:
             # Check if the user exists
@@ -162,6 +180,7 @@ class Mutation:
 
     @strawberry.mutation
     @require_api_secret
+    @rate_limit("send-otp-ip", key=by_ip, limit=20, window=HOUR)
     def forgot_password(self, info: Info, email: str) -> ForgotPasswordResponse:
         try:
             user = User.objects.get(email=email.strip().lower())
@@ -240,6 +259,7 @@ class Mutation:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["admin"])
     def trigger_channel_status_update(self, info: Info) -> str:
         """Manually trigger the channel/ad status update job"""
         from api.scheduler import update_channel_status
@@ -257,6 +277,7 @@ class Mutation:
 
     @strawberry.mutation
     @require_api_secret
+    @rate_limit("register-ip", key=by_ip, limit=10, window=HOUR)
     def client_register(self, info: Info, input: RegisterClientInput) -> UserType:
         try:
             email = input.email.strip().lower()
@@ -316,6 +337,8 @@ class Mutation:
 
     @strawberry.mutation
     @require_api_secret
+    @rate_limit("otp-email", key=by_email, limit=5, window=15 * MINUTE, failures_only=True, reset_on_success=True)
+    @rate_limit("otp-ip", key=by_ip, limit=30, window=15 * MINUTE, failures_only=True)
     def verify_otp(self, info: Info, email: str, otp_code: str) -> LoginResponse:
         try:
             user = User.objects.get(email=email)
@@ -366,6 +389,8 @@ class Mutation:
 
     @strawberry.mutation
     @require_api_secret
+    @rate_limit("login-email", key=by_email, limit=5, window=15 * MINUTE, failures_only=True, reset_on_success=True)
+    @rate_limit("login-ip", key=by_ip, limit=30, window=15 * MINUTE, failures_only=True)
     def login(self, info: Info, input: LoginInput) -> LoginResponse:
         """
         Handles user login and returns a JWT token.
@@ -451,10 +476,15 @@ class Mutation:
         business_profile = user.business_profile
 
         # Profile setup (the onboarding wizard) is not part of Settings. Once
-        # the account is approved AND its profile is complete, every profile
-        # edit is a Settings edit and needs an active Settings session. An
-        # approved business that has not finished setup can still finish it.
-        if user.is_admin_approved and _business_profile_is_complete(business_profile):
+        # the account is approved, its profile is complete AND the business is
+        # past setup, every profile edit is a Settings edit and needs an active
+        # Settings session. An approved business that has not finished setup can
+        # still finish it, even after its profile data happens to be complete.
+        if (
+            user.is_admin_approved
+            and _business_profile_is_complete(business_profile)
+            and _business_is_past_setup(user)
+        ):
             assert_settings_verified(info)
 
         # Update basic fields
@@ -598,6 +628,7 @@ class Mutation:
     @strawberry.mutation
     @require_api_secret
     @require_authentication
+    @require_role(["admin"])
     def add_business_category(self, info, input: AddCategoryInput) -> CreateCategoryAndSubCategorySuccessType:
 
         try:
@@ -618,6 +649,7 @@ class Mutation:
     @strawberry.mutation
     @require_api_secret
     @require_authentication
+    @require_role(["admin"])
     def update_category_and_subcat(self,info, input: UpdateCategoryInput)->UpdateCategoryAndSubCategorySuccessType:
         try:
             
@@ -654,6 +686,7 @@ class Mutation:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["admin"])
     def update_business_category(self, info: Info, input: UpdateCategoryInput) -> Optional[BusinessCategoryType]:
         try:
             category = BusinessCategory.objects.get(pk=input.id)
@@ -671,6 +704,7 @@ class Mutation:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["admin"])
     def delete_business_category(self, info: Info, id: strawberry.ID) -> bool:
         try:
             category = BusinessCategory.objects.get(pk=id)
@@ -733,6 +767,10 @@ class Mutation:
             user = info.context.request.user
             if user.role != "admin":
                 raise GraphQLError("Only admins can create advertisements.")
+
+            # A price of 0 makes the channel free; a negative price is never valid
+            if input.price_per_day is None or input.price_per_day < 0:
+                raise GraphQLError("Price per day cannot be negative.")
 
             # Master Clock: 3 AM Toronto on the day after end_date
             resolved_expiry_at = compute_master_clock_expiry(input.end_date)
@@ -1195,6 +1233,8 @@ class Mutation:
 
             # Handle price_per_day change: close current price history entry and open a new one
             new_price_per_day = getattr(input, 'price_per_day', None)
+            if new_price_per_day is not None and new_price_per_day < 0:
+                raise GraphQLError("Price per day cannot be negative.")
             if new_price_per_day is not None and new_price_per_day != ad.price_per_day:
                 # Close the currently open price history entry (effective_until = today)
                 open_price_entry = ChannelPriceHistory.objects.filter(
@@ -1357,6 +1397,7 @@ class Mutation:
     @jwt_required
     @require_api_secret
     @require_settings_verified
+    @rate_limit("change-password", key=by_user, limit=5, window=15 * MINUTE, failures_only=True, reset_on_success=True)
     def change_password(self, info: Info, input: ChangePasswordInput) -> str:
         request = info.context.request
         user = request.user  # Get the currently logged-in user
@@ -1398,6 +1439,7 @@ class Mutation:
     @jwt_required
     @require_api_secret
     @require_settings_verified
+    @rate_limit("new-email-otp", key=by_user, limit=5, window=15 * MINUTE, failures_only=True, reset_on_success=True)
     def verifyOtpForNewEmail(self, info, otp_code: str, new_email: str) -> str:
         try:
             user = info.context.request.user
@@ -1684,8 +1726,10 @@ class Mutation:
             ad = Advertisement.objects.get(id=input.id, user=user)
 
             # Reject start_date changes if the ad has already started —
-            # retroactively changing it would corrupt billing records
-            if input.start_date is not None:
+            # retroactively changing it would corrupt billing records.
+            # The edit form always sends the current start date back, so only
+            # a start date that actually differs counts as a change.
+            if input.start_date is not None and input.start_date != ad.start_date:
                 today = date.today()
                 if ad.start_date < today:
                     raise GraphQLError(
@@ -2190,6 +2234,10 @@ class Mutation:
         except Advertisement.DoesNotExist:
             return ReportAdvertisementResponse(success=False, message="Advertisement not found.")
 
+        # Only the business that owns the ad (or an admin) may clear its flag
+        if ad.user_id != user.id and user.role != "admin":
+            return ReportAdvertisementResponse(success=False, message="Advertisement not found.")
+
         flag = ad.active_flag
         if not flag:
             return ReportAdvertisementResponse(success=False, message="This advertisement is not flagged.")
@@ -2214,6 +2262,10 @@ class Mutation:
         try:
             listing = Listings.objects.get(pk=input.listing_id)
         except Listings.DoesNotExist:
+            return ResolveListingResponse(success=False, message="Listing not found.")
+
+        # Only the business that owns the listing (or an admin) may clear its flag
+        if listing.user_id != user.id and user.role != "admin":
             return ResolveListingResponse(success=False, message="Listing not found.")
 
         try:
@@ -2701,18 +2753,14 @@ class Mutation:
 
         try:
             user = info.context.request.user
-            # Extract business details from input OR fallback to user profile
-            business_name = input.business_name or "Not Available"
-            business_email = input.business_email or getattr(user, "email", "Not Available")
-            business_uuid = input.business_uuid or "Not Available"
-
-            if business_name == "Not Available" or business_uuid == "Not Available":
-                b_profile = getattr(user, "business_profile", None)
-                if b_profile:
-                    if business_name == "Not Available":
-                        business_name = getattr(b_profile, "business_name", "Not Available")
-                    if business_uuid == "Not Available":
-                        business_uuid = str(getattr(b_profile, "business_uuid", "Not Available"))
+            # The confirmation goes to the signed-in user's own email and the ticket
+            # carries their own business details. Values sent in the request are not
+            # trusted, otherwise anyone could send TWAM-branded mail to any address
+            # or file a ticket in another business's name.
+            b_profile = getattr(user, "business_profile", None)
+            business_email = getattr(user, "email", None) or "Not Available"
+            business_name = (getattr(b_profile, "business_name", None) if b_profile else None) or "Not Available"
+            business_uuid = (str(b_profile.business_uuid) if b_profile and b_profile.business_uuid else None) or "Not Available"
 
             if business_email == "Not Available":
                 raise ValueError(
@@ -2862,6 +2910,10 @@ class Mutation:
             # Find the listing
             listing = Listings.objects.get(id=listing_id)
 
+            # Only the business that owns the listing (or an admin) may end it
+            if listing.user_id != user.id and user.role != "admin":
+                raise GraphQLError("You can only end your own listings.")
+
             # Update status to phaseout
             listing.listing_status = "phaseout"
             listing.save()
@@ -2880,6 +2932,7 @@ class Mutation:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["admin"])
     def suspend_business(self, info, input: CreateSuspensionInput) -> SuspensionType:
         try:
             user = info.context.request.user
@@ -2930,6 +2983,7 @@ class Mutation:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["admin"])
     def revert_suspended_business(self, info, userId: str) -> RevertSuspendedBusinessReturnType:
         try:
             user = info.context.request.user

@@ -16,14 +16,20 @@ def create_stripe_customer(user: User) -> str:
         logger.warning("Stripe API key not set.")
         return "test_customer_id"
 
-    # Search for existing customer by email
-    customers = stripe.Customer.list(email=user.email, limit=1)
-    if customers and customers.data:
-        customer_id = customers.data[0].id
-        if user.stripe_customer_id != customer_id:
-            user.stripe_customer_id = customer_id
-            user.save()
-        return customer_id
+    # Reuse only the customer already linked to THIS account. Never adopt one just
+    # because the email matches: an earlier account (or another environment sharing
+    # this Stripe account) that used the same email would hand its saved cards to
+    # a brand-new account.
+    if user.stripe_customer_id:
+        try:
+            existing = stripe.Customer.retrieve(user.stripe_customer_id)
+            if not getattr(existing, "deleted", False):
+                return existing.id
+        except stripe.error.InvalidRequestError:
+            logger.warning(
+                "Stripe customer %s for user %s no longer exists; creating a new one.",
+                user.stripe_customer_id, user.id,
+            )
 
     # Create new customer
     customer = stripe.Customer.create(

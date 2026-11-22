@@ -102,28 +102,19 @@ class BusinessProfileType:
     @classmethod
     def from_instance(cls, instance, listings=None):
 
-        # Get current time in UTC
-        from datetime import timezone
-        now = datetime.now(timezone.utc)
-        today = now.strftime('%A').lower()  # e.g., 'monday'
-        current_time = now.time()
-
-        # Prepare hours list with dynamic is_closed update for today
+        # Return the hours exactly as the business set them. is_closed means
+        # "closed all day"; whether the business is open right now is worked
+        # out by the app from the user's own clock. (This used to overwrite
+        # is_closed using UTC time and full day names, which never matched the
+        # stored "mon"/"tue" names and would have used the wrong time zone.)
         dynamic_hours = []
         for hour in instance.business_hours.all():
-            is_closed = hour.is_closed
-            if hour.day == today:
-                if not is_closed and hour.opening_time and hour.closing_time:
-                    # Recalculate is_closed based on current time
-                    if not (hour.opening_time <= current_time <= hour.closing_time):
-                        is_closed = True  # Currently closed even if normally open
-
             dynamic_hours.append(
                 BusinessHoursType(
                     day=hour.day,
                     opening_time=hour.opening_time.isoformat() if hour.opening_time else None,
                     closing_time=hour.closing_time.isoformat() if hour.closing_time else None,
-                    is_closed=is_closed,
+                    is_closed=hour.is_closed,
                     is_24hours=hour.is_24hours or False,
                     is_overnight=hour.is_overnight or False
                 )
