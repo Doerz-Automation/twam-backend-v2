@@ -88,6 +88,21 @@ def _business_profile_is_complete(profile) -> bool:
     )
 
 
+def _business_is_past_setup(user) -> bool:
+    """True once a business is operating: it has an ad or a free daily ad, or it has
+    opened Settings (which creates its SettingsAccess record).
+
+    The profile becomes "complete" part-way through the setup wizard (older signups
+    already hold a category, so finishing Location and Business Info is enough), yet
+    the wizard still has to save the Business Category step afterwards. Completeness
+    alone would therefore lock the business out of finishing its own setup."""
+    return (
+        user.advertisements.exists()
+        or user.listings.exists()
+        or SettingsAccess.objects.filter(user=user).exists()
+    )
+
+
 @strawberry.type
 class Mutation:
     @strawberry.mutation
@@ -451,10 +466,15 @@ class Mutation:
         business_profile = user.business_profile
 
         # Profile setup (the onboarding wizard) is not part of Settings. Once
-        # the account is approved AND its profile is complete, every profile
-        # edit is a Settings edit and needs an active Settings session. An
-        # approved business that has not finished setup can still finish it.
-        if user.is_admin_approved and _business_profile_is_complete(business_profile):
+        # the account is approved, its profile is complete AND the business is
+        # past setup, every profile edit is a Settings edit and needs an active
+        # Settings session. An approved business that has not finished setup can
+        # still finish it, even after its profile data happens to be complete.
+        if (
+            user.is_admin_approved
+            and _business_profile_is_complete(business_profile)
+            and _business_is_past_setup(user)
+        ):
             assert_settings_verified(info)
 
         # Update basic fields
@@ -733,6 +753,10 @@ class Mutation:
             user = info.context.request.user
             if user.role != "admin":
                 raise GraphQLError("Only admins can create advertisements.")
+
+            # A price of 0 makes the channel free; a negative price is never valid
+            if input.price_per_day is None or input.price_per_day < 0:
+                raise GraphQLError("Price per day cannot be negative.")
 
             # Master Clock: 3 AM Toronto on the day after end_date
             resolved_expiry_at = compute_master_clock_expiry(input.end_date)
@@ -1195,6 +1219,8 @@ class Mutation:
 
             # Handle price_per_day change: close current price history entry and open a new one
             new_price_per_day = getattr(input, 'price_per_day', None)
+            if new_price_per_day is not None and new_price_per_day < 0:
+                raise GraphQLError("Price per day cannot be negative.")
             if new_price_per_day is not None and new_price_per_day != ad.price_per_day:
                 # Close the currently open price history entry (effective_until = today)
                 open_price_entry = ChannelPriceHistory.objects.filter(
@@ -1684,8 +1710,10 @@ class Mutation:
             ad = Advertisement.objects.get(id=input.id, user=user)
 
             # Reject start_date changes if the ad has already started —
-            # retroactively changing it would corrupt billing records
-            if input.start_date is not None:
+            # retroactively changing it would corrupt billing records.
+            # The edit form always sends the current start date back, so only
+            # a start date that actually differs counts as a change.
+            if input.start_date is not None and input.start_date != ad.start_date:
                 today = date.today()
                 if ad.start_date < today:
                     raise GraphQLError(
