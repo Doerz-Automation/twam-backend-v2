@@ -113,6 +113,16 @@ DATABASES = {
     }
 }
 
+# Shared cache in the main database, used for the sign-in / OTP rate limits
+# (api/rate_limit.py). Unlike the default in-memory cache it is shared by every
+# gunicorn worker and server. Migration 0007 creates the table.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'twam_cache',
+    }
+}
+
         # 'HOST': "127.0.0.1",  # <- use local tunnel
         # 'PORT': 4433           # <- local forwarded port
 

@@ -560,6 +560,8 @@ class Query:
     @strawberry.field
     @require_api_secret
     @require_authentication
+    @jwt_required
+    @require_role(["admin"])
     def list_all_users(self, info: Info) -> list[UserType]:
         """
         Get a list of all users.
@@ -1280,6 +1282,7 @@ class Query:
     @require_authentication
     @jwt_required
     @require_api_secret
+    @require_role(["admin"])
     def flagged_advertisements(self, info) -> list[AdvertisementType]:
         return Advertisement.objects.filter(flags__isnull=False).distinct()
 
@@ -1287,6 +1290,7 @@ class Query:
     @jwt_required
     @require_api_secret
     @strawberry.field
+    @require_role(["admin"])
     def all_flags(self, info) -> list[AdvertisementFlagType]:
         return AdvertisementFlag.objects.select_related("advertisement", "flagged_by").all()
 
@@ -2435,6 +2439,7 @@ class Query:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["admin"])
     def get_business_by_id(
         self,
         info: Info,
@@ -2578,6 +2583,7 @@ class Query:
     @require_api_secret
     @require_authentication
     @jwt_required
+    @require_role(["admin"])
     def get_suspension_history(self, info, userId: int) -> List[SuspensionType]:
         try:
             business = (
