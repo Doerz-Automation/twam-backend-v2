@@ -12,6 +12,7 @@ from decimal import Decimal
 from django.utils import timezone as notTimeZone
 from django.db.models import Q
 from django.apps import apps
+from api.email_utils import normalize_email
 from graphql import GraphQLError
 from typing import Optional
 import random
@@ -298,6 +299,19 @@ def normalize_na_phone(value):
     return cleaned
 
 
+class OtpThrottled(GraphQLError):
+    """A code was sent too recently to send another one. Callers that only
+    want to make sure a code exists (login of an unverified account) can
+    ignore it: the earlier code still works."""
+
+
+class OtpVerificationRequired(GraphQLError):
+    """The account exists but its email is not verified yet. An expected
+    step that sends the user to the OTP page, not a failed login, so the
+    login rate limit does not count it."""
+    counts_as_failure = False
+
+
 def generate_and_send_otp(user, purpose="Authentication", new_email=False, expiry_minutes=5):
     """
     Generates a new OTP for a given user and sends it to their email.
@@ -314,6 +328,8 @@ def generate_and_send_otp(user, purpose="Authentication", new_email=False, expir
     """
     now = datetime.now(timezone.utc)
     OTP = apps.get_model('api', 'OTP')
+    # the address this code is emailed to, and the only one it can verify
+    sent_to = normalize_email(new_email) if new_email else user.email
 
     # Retrieve the most recent OTP record, if available
     otp_record = OTP.objects.filter(user=user).order_by('-created_at').first()
@@ -330,14 +346,14 @@ def generate_and_send_otp(user, purpose="Authentication", new_email=False, expir
             cooldown_remaining = OTP_COOLDOWN_PERIOD - time_since_last_sent
             if cooldown_remaining > 0:
                 minutes = int(cooldown_remaining // 60)
-                raise GraphQLError(
+                raise OtpThrottled(
                     f"Too many OTP requests. Please try again in {minutes} minutes.")
 
         # Enforce minimum resend interval
 
         if time_since_last_sent < OTP_RESEND_INTERVAL:
             wait_time = OTP_RESEND_INTERVAL - time_since_last_sent
-            raise GraphQLError(
+            raise OtpThrottled(
                 f"Please wait {int(wait_time)} seconds before requesting another OTP.")
 
         # If cooldown has passed, reset retry count
@@ -351,6 +367,7 @@ def generate_and_send_otp(user, purpose="Authentication", new_email=False, expir
         otp_record.retry_count += 1
         otp_record.last_sent_at = now
         otp_record.verification_attempts = 0
+        otp_record.sent_to = sent_to
         otp_record.save()
     else:
         # Create a new OTP record if none exists
@@ -361,18 +378,38 @@ def generate_and_send_otp(user, purpose="Authentication", new_email=False, expir
             expires_at=now + timedelta(minutes=expiry_minutes),
             retry_count=1,
             last_sent_at=now,
-            verification_attempts=0
+            verification_attempts=0,
+            sent_to=sent_to,
         )
 
     # Send the OTP email
     full_name = f"{user.first_name} {user.last_name}"
 
-    if new_email:
-        send_otp_email(new_email, full_name, otp_record.otp_code, purpose)
-    else:
-        send_otp_email(user.email, full_name, otp_record.otp_code, purpose)
+    send_otp_email(sent_to, full_name, otp_record.otp_code, purpose)
 
     return "OTP sent successfully."
+
+
+def find_otp(user, otp_code, new_email=None):
+    """
+    The user's OTP record for `otp_code`, or None. Every code check goes
+    through here.
+
+    A code only proves control of the address it was emailed to:
+    - without new_email (sign-up, login, forgot password, settings, payment,
+      password): the code must have been sent to the account's own email
+    - with new_email (email change): it must have been sent to that new email
+
+    Codes issued before OTP.sent_to existed (null) count as sent to the
+    account email; they expire within minutes of the deploy.
+    """
+    OTP = apps.get_model('api', 'OTP')
+    qs = OTP.objects.filter(user=user, otp_code=(otp_code or "").strip())
+    if new_email:
+        qs = qs.filter(sent_to=normalize_email(new_email))
+    else:
+        qs = qs.filter(Q(sent_to=user.email) | Q(sent_to__isnull=True))
+    return qs.first()
 
 
 def send_otp_email(user_email, full_name, otp_code, purpose="Authentication"):

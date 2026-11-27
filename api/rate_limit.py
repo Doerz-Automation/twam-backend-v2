@@ -16,6 +16,8 @@ from functools import wraps
 from django.core.cache import cache
 from graphql import GraphQLError
 
+from api.email_utils import normalize_email
+
 TOO_MANY = "Too many attempts. Please try again in {minutes} minute{s}."
 
 
@@ -40,7 +42,7 @@ def by_email(info, kwargs):
     email = kwargs.get("email")
     if email is None and kwargs.get("input") is not None:
         email = getattr(kwargs["input"], "email", None)
-    return (email or "").strip().lower() or None
+    return normalize_email(email) or None
 
 
 def by_user(info, kwargs):
@@ -106,8 +108,10 @@ def rate_limit(scope, *, key, limit, window, failures_only=False, reset_on_succe
                 _hit(k, window)
             try:
                 result = func(self, info, *args, **kwargs)
-            except Exception:
-                if failures_only:
+            except Exception as e:
+                # errors that are an expected next step (e.g. "verify your
+                # email first") set counts_as_failure = False
+                if failures_only and getattr(e, "counts_as_failure", True):
                     _hit(k, window)
                 raise
             if reset_on_success:

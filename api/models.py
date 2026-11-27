@@ -7,12 +7,31 @@ from django.contrib.auth import get_user_model
 from django.contrib.postgres.fields import ArrayField
 from django.conf import settings
 
+from api.email_utils import normalize_email
+
 
 class UserManager(BaseUserManager):
+    # --- email: the only way code should find users by email (see email_utils) ---
+
+    def get_by_email(self, email):
+        """User with this email, whatever its case or surrounding spaces.
+        Raises User.DoesNotExist like .get()."""
+        return self.get(email=normalize_email(email))
+
+    def email_exists(self, email, exclude_id=None):
+        qs = self.filter(email=normalize_email(email))
+        if exclude_id is not None:
+            qs = qs.exclude(id=exclude_id)
+        return qs.exists()
+
+    def get_by_natural_key(self, username):
+        # Django's own auth (ModelBackend, admin login) looks users up here
+        return self.get_by_email(username)
+
     def create_user(self, email, password=None, **extra_fields):
+        email = normalize_email(email)
         if not email:
             raise ValueError("Users must have an email address")
-        email = self.normalize_email(email)
         extra_fields.setdefault("is_active", True)  # Default users to active
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
@@ -76,6 +95,13 @@ class User(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return self.email
 
+    def save(self, *args, **kwargs):
+        # Every way of storing a user (sign-up, email change, Django admin,
+        # scripts) ends up here, so the stored email is always normalized.
+        # QuerySet.update() skips save(); never use it to write emails.
+        self.email = normalize_email(self.email)
+        super().save(*args, **kwargs)
+
     def is_admin(self):
         return self.role == "admin"
 
@@ -113,6 +139,11 @@ class OTP(models.Model):
         auto_now=True)  # Tracks last sent timestamp
     retry_count = models.IntegerField(default=0)        # Counts OTP requests
     verification_attempts = models.IntegerField(default=0) # Counts incorrect verifications
+    # The address the code was emailed to. A code proves control of that
+    # address only: one sent to a new email (email change) cannot verify the
+    # account, and one sent to the account email cannot confirm an email change.
+    # Null on codes issued before this field existed.
+    sent_to = models.EmailField(null=True, blank=True)
 
     def is_expired(self):
         # Use timezone-aware datetime comparison

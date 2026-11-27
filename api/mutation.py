@@ -1,3 +1,4 @@
+from decimal import Decimal
 from .models import BusinessSubCategory, ListingFlag, Listings, SupportTicket
 import strawberry
 import logging
@@ -32,8 +33,9 @@ from django.utils.timezone import now
 from django.core.mail import send_mail
 from django.contrib.auth import authenticate
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
-from api.utils import SESEmailSender, generate_jwt_token, generate_and_send_otp, generate_report_id, normalize_na_phone, assert_account_allowed_in_app
+from api.utils import OtpThrottled, OtpVerificationRequired, SESEmailSender, find_otp, generate_jwt_token, generate_and_send_otp, generate_report_id, normalize_na_phone, assert_account_allowed_in_app
 from api.stripe_services import create_stripe_customer, cancel_subscription, create_setup_intent, set_customer_default_payment_method
+from api.email_utils import normalize_email
 from api.rate_limit import HOUR, MINUTE, by_email, by_ip, by_user, rate_limit
 from api.decorators import (jwt_required, require_api_secret, require_authentication, require_role, require_not_suspended,
                             require_settings_verified, assert_settings_verified, get_access_token_jti,
@@ -104,6 +106,20 @@ def _business_is_past_setup(user) -> bool:
     )
 
 
+def same_money(a, b):
+    """True when two amounts are the same to the cent.
+
+    The API receives prices as floats while the database holds Decimals, and
+    Decimal("4.99") != 4.99 in Python. Comparing them directly made an
+    unchanged price look changed, so saving a running channel (e.g. adding a
+    category) hit the discount lock or opened a new price period.
+    """
+    if a is None or b is None:
+        return a is None and b is None
+    cent = Decimal("0.01")
+    return Decimal(str(a)).quantize(cent) == Decimal(str(b)).quantize(cent)
+
+
 @strawberry.type
 class Mutation:
     @strawberry.mutation
@@ -115,8 +131,13 @@ class Mutation:
         # Canada/US numbers only: +1 and exactly 10 digits, stored as +1XXXXXXXXXX
         personal_phone = normalize_na_phone(input.personal_phone)
 
+        # Same email in another case ("Ann@x.com" vs "ann@x.com") is the same
+        # account; refuse it here instead of failing on the database constraint
+        if User.objects.email_exists(input.email):
+            raise GraphQLError("Email already exists. Please use a different email.")
+
         user = User.objects.create_user(
-            email=input.email.strip().lower(),
+            email=input.email,  # normalized by create_user / User.save
             password=input.password,
             first_name=first_name,
             last_name=last_name,
@@ -169,8 +190,7 @@ class Mutation:
     @rate_limit("send-otp-ip", key=by_ip, limit=20, window=HOUR)
     def resend_otp(self, info: Info, email: str) -> ResendOTPResponse:
         try:
-            # Check if the user exists
-            user = User.objects.get(email=email)
+            user = User.objects.get_by_email(email)
         except User.DoesNotExist:
             raise GraphQLError("User with this email does not exist.")
 
@@ -183,7 +203,7 @@ class Mutation:
     @rate_limit("send-otp-ip", key=by_ip, limit=20, window=HOUR)
     def forgot_password(self, info: Info, email: str) -> ForgotPasswordResponse:
         try:
-            user = User.objects.get(email=email.strip().lower())
+            user = User.objects.get_by_email(email)
             
             # Generate and send OTP for password reset
             generate_and_send_otp(user, purpose="Forgot Password")
@@ -280,10 +300,10 @@ class Mutation:
     @rate_limit("register-ip", key=by_ip, limit=10, window=HOUR)
     def client_register(self, info: Info, input: RegisterClientInput) -> UserType:
         try:
-            email = input.email.strip().lower()
+            email = normalize_email(input.email)
 
             # Check if the email already exists
-            if User.objects.filter(email=email).exists():
+            if User.objects.email_exists(email):
                 raise GraphQLError(
                     "Email already exists. Please use a different email.")
 
@@ -341,9 +361,8 @@ class Mutation:
     @rate_limit("otp-ip", key=by_ip, limit=30, window=15 * MINUTE, failures_only=True)
     def verify_otp(self, info: Info, email: str, otp_code: str) -> LoginResponse:
         try:
-            user = User.objects.get(email=email)
-            otp_record = OTP.objects.filter(
-                user=user, otp_code=otp_code).first()
+            user = User.objects.get_by_email(email)
+            otp_record = find_otp(user, otp_code)
 
             if not otp_record:
                 raise GraphQLError("Invalid OTP.")
@@ -398,14 +417,26 @@ class Mutation:
 
         try:
             # Fetch user by email
-            user = User.objects.get(email=input.email.strip().lower())
+            user = User.objects.get_by_email(input.email)
 
             print(user)
 
+            # Verify the password first. Nothing about the account (not
+            # verified, deactivated, inactive) is revealed, and no OTP is
+            # emailed, until the caller proves they know the password.
+            if not user.check_password(input.password):
+                raise Exception("Invalid email or password")
+
             # Check if user is verified
             if not user.is_verified:
-                generate_and_send_otp(user, purpose="Signup")
-                raise GraphQLError("User has not completed OTP verification.")
+                try:
+                    generate_and_send_otp(user, purpose="Signup")
+                except OtpThrottled:
+                    # A code went out moments ago and still works. The
+                    # throttle stops another email, not the user: they
+                    # continue to the OTP page and can resend from there.
+                    pass
+                raise OtpVerificationRequired("User has not completed OTP verification.")
 
             # Check if business account has been deactivated
             if user.role == "business" and hasattr(user, 'business_profile') and user.business_profile.is_deactivated:
@@ -416,10 +447,6 @@ class Mutation:
             if not user.is_active:
                 raise GraphQLError(
                     "User account is inactive. Please contact support.")
-
-            # Verify the password
-            if not user.check_password(input.password):
-                raise Exception("Invalid email or password")
 
             # Business and admin accounts do not use the mobile app. Checked after
             # the password so a wrong password never reveals the account type.
@@ -727,8 +754,8 @@ class Mutation:
         from django.contrib.auth.password_validation import validate_password
         from django.core.exceptions import ValidationError
 
-        email = email.strip().lower()
-        if User.objects.filter(email=email).exists():
+        email = normalize_email(email)
+        if User.objects.email_exists(email):
             raise GraphQLError("A user with this email already exists.")
         try:
             validate_password(password)
@@ -961,7 +988,7 @@ class Mutation:
                 # Check for attempts to modify locked fields
                 if input.apply_discount is not None and input.apply_discount != ad.apply_discount:
                     locked_fields_changed = True
-                if input.discount_price is not None and getattr(input, 'discount_price', None) != ad.discount_price:
+                if input.discount_price is not None and not same_money(input.discount_price, ad.discount_price):
                     locked_fields_changed = True
                 if input.start_date is not None and input.start_date != ad.start_date:
                     locked_fields_changed = True
@@ -992,7 +1019,7 @@ class Mutation:
 
             discount_changing = (
                 new_apply_discount != ad.apply_discount or
-                (new_apply_discount and new_discount_price != ad.discount_price) or
+                (new_apply_discount and not same_money(new_discount_price, ad.discount_price)) or
                 (new_apply_discount and resolved_start_date != ad.discount_start_date) or
                 (new_apply_discount and resolved_end_date != ad.discount_end_date)
             )
@@ -1235,7 +1262,7 @@ class Mutation:
             new_price_per_day = getattr(input, 'price_per_day', None)
             if new_price_per_day is not None and new_price_per_day < 0:
                 raise GraphQLError("Price per day cannot be negative.")
-            if new_price_per_day is not None and new_price_per_day != ad.price_per_day:
+            if new_price_per_day is not None and not same_money(new_price_per_day, ad.price_per_day):
                 # Close the currently open price history entry (effective_until = today)
                 open_price_entry = ChannelPriceHistory.objects.filter(
                     channel=ad,
@@ -1417,13 +1444,13 @@ class Mutation:
     @require_settings_verified
     def change_email(self, info: Info, email: str) -> str:
         try:
-            new_email = email.strip().lower()
+            new_email = normalize_email(email)
             request = info.context.request
             user = request.user
             # Check if the user is authenticated
             if not user.is_authenticated:
                 raise GraphQLError("User is not authenticated.")
-            if User.objects.filter(email=new_email).exclude(id=user.id).exists():
+            if User.objects.email_exists(new_email, exclude_id=user.id):
                 raise GraphQLError("Email already exists.")
             if user.email == new_email:
                 raise GraphQLError(
@@ -1447,8 +1474,11 @@ class Mutation:
             if not user.is_authenticated:
                 raise GraphQLError("User must be authenticated first")
 
-            new_email = new_email.strip().lower()
-            otp = OTP.objects.filter(user=user, otp_code=otp_code).first()
+            new_email = normalize_email(new_email)
+            # the code must be the one emailed to this new address; a code
+            # sent to the current email (or another address) does not prove
+            # the person owns the new one
+            otp = find_otp(user, otp_code, new_email=new_email)
 
             if not otp:
                 raise GraphQLError("Invalid OTP code.")
@@ -1457,6 +1487,10 @@ class Mutation:
             if otp.is_expired():
                 otp.delete()
                 raise GraphQLError("OTP has expired")
+
+            # it may have been taken since the code was sent
+            if User.objects.email_exists(new_email, exclude_id=user.id):
+                raise GraphQLError("Email already exists.")
 
             # Update user model
             user.email = new_email
@@ -3098,7 +3132,7 @@ class Mutation:
             )
 
         # ── 3. Look up the OTP record ────────────────────────────────────────────
-        otp_record = OTP.objects.filter(user=user, otp_code=otp_code).first()
+        otp_record = find_otp(user, otp_code)
 
         if not otp_record or otp_record.is_expired():
             # ── Wrong / expired OTP ──────────────────────────────────────────────
@@ -3243,7 +3277,7 @@ class Mutation:
             )
 
         # ── 3. Look up the OTP record ────────────────────────────────────────────
-        otp_record = OTP.objects.filter(user=user, otp_code=otp_code).first()
+        otp_record = find_otp(user, otp_code)
 
         if not otp_record or otp_record.is_expired():
             # ── Wrong / expired OTP ──────────────────────────────────────────────
@@ -3415,7 +3449,7 @@ class Mutation:
         if access.attempt_count >= MAX_SETTINGS_OTP_ATTEMPTS:
             return VerifySettingsOtpResponse(success=False, message="LOCKED_OUT")
 
-        otp_record = OTP.objects.filter(user=user, otp_code=otp_code).first()
+        otp_record = find_otp(user, otp_code)
 
         if not otp_record or otp_record.is_expired():
             access.attempt_count += 1
