@@ -770,6 +770,7 @@ class Query:
     @require_authentication
     @jwt_required
     @require_api_secret
+    @require_role(["admin"])
     def get_users_list(
         self,
         info: Info,
@@ -781,7 +782,10 @@ class Query:
             if is_admin_approved is True:
                 users = users.filter(is_admin_approved=True)
             elif is_admin_approved is False:
-                users = users.filter(is_admin_approved=False)
+                # Approval requests: only accounts that finished sign-up by
+                # verifying their email. A business is saved before the OTP
+                # step, so an unfinished sign-up must not show up yet.
+                users = users.filter(is_admin_approved=False, is_verified=True)
             elif is_admin_approved is None:
                 users = users.filter(is_admin_approved__isnull=True)
 
